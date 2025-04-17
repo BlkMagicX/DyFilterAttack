@@ -4,4 +4,5 @@ pytorch_grad_cam/.ipynb_checkpoints
 pytorch_grad_cam/utils/__pycache__
 pytorch_grad_cam/feature_factorization/__pycache__
 pytorch_grad_cam/metrics/__pycache__
+mask-attack/datasets
 
