@@ -2,6 +2,7 @@
 __pycache__/
 pytorch_grad_cam/__pycache__
 mask_attack/__pycache__
+mask_attack/attack_result/
 pytorch_grad_cam/.ipynb_checkpoints
 pytorch_grad_cam/utils/__pycache__
 pytorch_grad_cam/feature_factorization/__pycache__

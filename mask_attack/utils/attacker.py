@@ -26,7 +26,9 @@ from PIL import Image
 from tqdm import tqdm
 from ultralytics.utils.loss import v8DetectionLoss
 from torch.utils.data import DataLoader
+from mask_attack.utils.dataset import CustomDataset, custom_collate_fn
 import torch
+import warnings
 
 class Attacker:
     def __init__(self, trainer, dataset, batch_size=1, custom_collate_fn=None):
@@ -39,8 +41,27 @@ class Attacker:
         self.dataset = dataset
         self.custom_collate_fn = custom_collate_fn
         self.batch_size = batch_size
-        self.attack_fuction = None
-        self.batch_loader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, collate_fn=self.custom_collate_fn)
+        self.batch_loader = DataLoader(self.dataset, batch_size=self.batch_size, 
+                                       shuffle=False, collate_fn=self.custom_collate_fn)
+        # param view
+        self.method_config = {
+            "fgsm": {
+                'attack_function': self.fgsm,
+                'params_name': ["epsilon"]
+            },
+            "masked_fgsm": {
+                'attack_function': self.masked_fgsm,
+                'params_name': ["epsilon"]
+            },
+            "pgd": {
+                'attack_function': self.pgd,
+                'params_name': ["epsilon", "alpha", "num_iter"]
+            },
+            "masked_pgd":{
+                'attack_function': self.masked_pgd,
+                'params_name': ["epsilon", "alpha", "num_iter"]
+            }
+        }
         # ** 
 
     def compute_gradient(self, sample):
@@ -125,55 +146,56 @@ class Attacker:
         return perturbed_image
     
     def batch_attack(self, method, output_dir = "./mask-attack/result", **kwargs):
-        """
-        Perform a batch-wise adversarial attack using the specified method.
-
-        Args:
-            epsilon (float): Perturbation magnitude.
-            method (str): Attack method to use (e.g., "fgsm_attack", "masked_fgsm_attack").
-        """
-        # Define available attack methods
-        attack_methods = {
-            "fgsm": self.fgsm,
-            "masked_fgsm": self.masked_fgsm,
-            "pgd": self.pgd,
-            "masked_pgd": self.masked_pgd
-        }
         # Validate the chosen attack method
-        if method not in attack_methods:
+        if method not in self.method_config:
             raise ValueError(f"Unsupported attack method: {method}. "
-                             f"Available methods are: {list(attack_methods.keys())}")
-        # Get the selected attack function
-        self.attack_function = attack_methods[method]
-        print(f"Using attack method: {method}")
-
+                             f"Available methods are: {list(self.method_config.keys())}")
+        else:
+            try:
+                # 动态提取参数并调用攻击函数
+                attack_function = self.method_config[method]['attack_function']
+                params_name = [para_name for para_name in self.method_config[method]['params_name']]
+                params_value = [kwargs[para_name] for para_name in self.method_config[method]['params_name']]
+            except KeyError as e:
+                raise ValueError(f"Missing required parameter: {e}")
+        
         # Create DataLoader for batch processing
-        batch_loader_with_progress = tqdm(self.batch_loader, desc="Processing Batches", total=len(self.batch_loader))
+        batch_loader_with_progress = tqdm(
+            self.batch_loader,
+            desc=(
+                f"Processing Batches in {method}-"
+                f"{'-'.join([f'{params_name[para_idx]}-{params_value[para_idx]:.4f}' for para_idx in range(len(params_name))])}"                         
+            ),
+            total=len(self.batch_loader)
+        )
 
         # Process each batch
         for batch in batch_loader_with_progress:
             if batch is None:  # Skip empty batches
                 continue
-            
-            # print(f"batch cls size: {batch['classes'].size()}")
-            # print(f"batch bidx size: {batch['batch_indices'].size()}")
-            # print(f"batch bbox size: {batch['bboxes'].size()}")
-            
-            # Perform the attack on the single sample
-            if method == "fgsm":
-                perturbed_batch = self.attack_function(batch, kwargs["epsilon"])
-            elif method == "masked_fgsm":
-                perturbed_batch = self.attack_function(batch, kwargs["epsilon"])
-            elif method == "pgd":
-                perturbed_batch = self.attack_function(batch, kwargs["epsilon"], kwargs["alpha"], kwargs["num_iter"])
-            elif method == "masked_pgd":
-                perturbed_batch = self.attack_function(batch, kwargs["epsilon"], kwargs["alpha"], kwargs["num_iter"])
-            else:
-                return
+                  
+            perturbed_batch = attack_function(batch, *params_value)
             
             # save pertrubed images
             os.makedirs(os.path.join(output_dir, "images"), exist_ok=True)
             os.makedirs(os.path.join(output_dir, "labels"), exist_ok=True)
+            # perturbed_np_batch = (perturbed_batch * 255).cpu().clamp(0, 255).byte().numpy()
+            # perturbed_np_batch = perturbed_np_batch.transpose(0, 2, 3, 1)  # (N, H, W, C)
+            
+            # for i in range(len(perturbed_np_batch)):
+            #     perturbed_img = perturbed_np_batch[i]
+                
+            #     original_image_path = batch['image_path'][i]
+            #     custom_image_path = os.path.join(
+            #         output_dir, "images", os.path.basename(original_image_path)
+            #     )
+            #     Image.fromarray(perturbed_img, mode='RGB').save(custom_image_path)
+                
+            #     original_label_path = batch['label_path'][i]
+            #     custom_labels_path = os.path.join(
+            #         output_dir, "labels", os.path.basename(original_label_path)
+            #     )
+            #     shutil.copy2(original_label_path, custom_labels_path)
             for i in range(len(perturbed_batch)):
                 # 单样本处理
                 perturbed_img = perturbed_batch[i].cpu()
@@ -194,8 +216,65 @@ class Attacker:
                 )
                 shutil.copy2(original_label_path, custom_labels_path)
 
-            # print("Batch-wise masked FGSM attack completed and results saved.")
+            
 
-    
     def adversarial_training(self):
         pass
+    
+    
+def classes_batch_attack_gtsrb(trainer,
+                               test_classes_root,
+                               output_root,
+                               method='pgd', 
+                               epsilon=0.02, 
+                               alpha=0.0003, 
+                               num_iter=100):
+    for class_name in os.listdir(test_classes_root):
+        if class_name not in ['0', '2', '14', '23', '39']:
+            continue
+        
+        class_dir = os.path.join(test_classes_root, class_name)
+        if not os.path.isdir(class_dir):
+            continue
+        
+        images_dir_path = os.path.join(class_dir, "images")
+        labels_dir_path = os.path.join(class_dir, "labels")
+
+        if not (os.path.exists(images_dir_path) and os.path.exists(labels_dir_path)):
+            print(f"Skip class {class_name}: lack images or labels dir")
+            continue
+        
+        epsilon_str = f"{epsilon:.4f}".replace('.', '-')
+        alpha_str = f"{alpha:.4f}".replace('.', '-')
+        if method == 'fgsm' or method == 'masked_fgsm':
+            output_dir = os.path.join(output_root, f"{method}_{epsilon_str}", class_name)
+        elif method == 'pgd' or method == 'masked_pgd':
+            output_dir = os.path.join(output_root, f"{method}_{epsilon_str}_{alpha_str}_{num_iter}", class_name)
+        else:
+            output_dir = os.path.join(output_root, class_name)
+        os.makedirs(output_dir, exist_ok=True)
+
+        try:
+            train_dataset = CustomDataset(
+                images_dir_path=images_dir_path,
+                labels_dir_path=labels_dir_path,
+                image_width=640,
+                image_height=640
+            )
+
+            attacker = Attacker(
+                trainer=trainer,
+                dataset=train_dataset,
+                batch_size=32,
+                custom_collate_fn=custom_collate_fn
+            )
+
+            # 执行攻击（忽略警告）
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning)
+                attacker.batch_attack(method=method, output_dir=output_dir, epsilon=epsilon, alpha=alpha, num_iter=num_iter)
+
+            print(f"Attack class {class_name}: Finished, Save in {output_dir}")
+
+        except Exception as e:
+            print(f"Attack class {class_name} Error, {e}")
