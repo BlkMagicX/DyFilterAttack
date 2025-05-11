@@ -220,10 +220,13 @@ def create_temp_yaml(train_path, val_path, origin_yaml_path):
         data = yaml.safe_load(f)
     
     # 修改路径值并添加单引号包裹
-    data['train'] = f"'{os.path.abspath(train_path)}'"
-    data['val'] = f"'{os.path.abspath(val_path)}'"
+    data['train'] = f'{os.path.abspath(train_path)}'
+    data['val'] = f'{os.path.abspath(os.path.join(val_path, "images"))}'
     
     # 保存为临时YAML文件，保持键顺序和格式
     with open('./temp_data.yaml', 'w') as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-    return os.path.abspath('./temp_data.yaml')
+        temp_path = os.path.abspath('./temp_data.yaml')
+        print(f"Create temp_data.yaml in {temp_path}")
+        return temp_path
+
