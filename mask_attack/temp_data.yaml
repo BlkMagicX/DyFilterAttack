@@ -1,5 +1,5 @@
 train: e:\bmx\YoloCAM\gtsrb_yolo\train\images
-val: e:\bmx\gtsrb_no_classes_attacked_test\masked_fgsm_0-0500\images
+val: e:\bmx\gtsrb_no_classes_attacked_test\masked_pgd_0-0300_0-0003_100\images
 nc: 43
 names:
 - class0
