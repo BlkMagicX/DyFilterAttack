@@ -1,16 +1,5 @@
 import torch
 import torch.nn as nn
-from ultralytics.utils.tal import TaskAlignedAssigner
-from ultralytics.utils.loss import xywh2xyxy, dist2bbox, make_anchors
-
-# 这部分代码位于 Attacker 类的 loss_total 方法内部
-# 在调用此嵌套函数之前，_x_pred_model_output 和 _x_adv_pred_model_output 应该已经通过
-# _x_pred_model_output = self.trainer.model(x)
-# _x_adv_pred_model_output = self.trainer.model(x_adv)
-# 计算得到。
-
-
-    
 
 def loss_total(trainer, lambda1, lambda2, lambda3, m, x, x_adv, key_filters):
     def loss_l2_perturbation():
