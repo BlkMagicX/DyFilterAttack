@@ -26,7 +26,7 @@ class SaveFeatures:
         for name, child in module.named_children():
             current_path = f"{parent_path}.{name}" if parent_path else name
             # if isinstance(child, torch.nn.BatchNorm2d):
-            # print(f"    Registering Hook: {current_path}")
+            # print(f"Registering Hook: {current_path})"
             hook = child.register_forward_hook(
                 hook=partial(self.hook_fn, path=current_path)
             )

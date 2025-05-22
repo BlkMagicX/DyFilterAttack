@@ -25,6 +25,7 @@ import shutil
 from PIL import Image
 from tqdm import tqdm
 from ultralytics.utils.loss import v8DetectionLoss
+from mask_attack.utils.loss import loss_total
 from torch.utils.data import DataLoader
 from mask_attack.utils.dataset import custom_collate_fn
 import torch
@@ -61,7 +62,7 @@ class Attacker:
                 'params_name': ["epsilon", "alpha", "num_iter"]
             },
             "filter_attack":{
-                'attack_function': self.filter_attack,
+                'attack_function': self.single_filter_attack,
                 'params_name': ["lr", "epsilon", "num_iter", "key_filters"]
             }
         }
@@ -146,87 +147,39 @@ class Attacker:
             # Project back to the epsilon-ball and [0, 1] range
             delta = torch.clamp(perturbed_image - image, -epsilon, epsilon)
             perturbed_image = torch.clamp(image + delta, 0, 1).detach().requires_grad_(True)
-        return perturbed_image
-    
-    def loss_total(self, lamda1, lamda2, lamda3, m, x, x_adv, key_filters):
-        def loss_l2_perturbation():
-            # 假设图像范围是 [-0.5, 0.5] 或 [0, 1]，保持一致性即可
-            squared_diff = torch.square((x - x_adv) * m)
-            l2_dist_per_sample = torch.sum(squared_diff, dim=[1, 2, 3])  # 对 HWC 维度求和，保留 batch
-            loss = torch.sum(l2_dist_per_sample)  # batch 总和，类似原代码中 tf.reduce_sum(self.l2dist)
-            return loss
+        return perturbed_image    
         
-        def loss_filter_diff():
-            loss = torch.tensor(0.0, device=self.trainer.device)
-            for layer_name, channel_idx in key_filters.items():
-                if channel_idx:
-                    activation_x = activations_x[layer_name][:, channel_idx]  # shape: [B, H, W]
-                    activation_x_adv = activations_x_adv[layer_name][:, channel_idx]
-                    activation_avg = (activation_x + activation_x_adv) / 2.0
-                    l2_norm_squared = torch.sum(activation_avg ** 2, dim=[1, 2])
-                    loss += torch.mean(l2_norm_squared)
-                    loss = -loss
-            return loss
-        
-        def loss_misclassification():
-            loss_fn = v8DetectionLoss(self.trainer.model)
-            loss_fn, _ = loss_fn(x_pred, x_adv_pred)
-            loss = -loss_fn[1]
-            return loss
-        
-        from analyzer.utils import SaveFeatures
-        save_features = SaveFeatures()
-        save_features.register_hooks(module=self.trainer.model, parent_path="")
-        
-        x_pred = self.trainer.model(x)
-        activations_x = save_features.get_features()
-        x_adv_pred = self.trainer.model(x_adv)
-        activations_x_adv = save_features.get_features()
-        save_features.close()
-        
-        loss_tatal = lamda1 * loss_l2_perturbation() + lamda2 * loss_filter_diff() + lamda3 * loss_misclassification()
-        
-        return loss_tatal
-
-    def filter_attack(self, sample, lr, epsilon, num_iter, key_filters):
-        x = sample['image'].clone().detach().to(self.trainer.device)
-        m = sample['mask'].clone().detach().to(self.trainer.device)
+    def single_filter_attack(self, sample, lr, epsilon, num_iter, lambda1, lambda2, lambda3, key_filters):
+        x = sample['image'].clone().detach().to(self.trainer.device).unsqueeze(0).requires_grad_(True)
+        m = sample['mask'].clone().detach().to(self.trainer.device).unsqueeze(0).requires_grad_(True)
         x_adv = x.clone().detach().requires_grad_(True)
 
         optimizer = torch.optim.Adam([x_adv], lr=lr)
         
         for step in range(num_iter):
             optimizer.zero_grad()
-            loss = self.loss_total(lamda1=0.1, lamda2=1.0, lamda3=1.0, m=m, x=x, x_adv=x_adv, key_filters=key_filters)
-            loss.backward() # type: ignore
+            loss = loss_total(self.trainer, 
+                              lambda1=lambda1, lambda2=lambda2, lambda3=lambda3, 
+                              m=m, x=x, x_adv=x_adv, key_filters=key_filters)
+            total_loss = loss[-1]
+            total_loss.backward()
+            
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(x_adv, max_norm=1.0)
             
             optimizer.step()
             with torch.no_grad():
-                delta = torch.clamp(x_adv - x, -epsilon, epsilon)
-                x_adv = torch.clamp(x + delta, 0, 1).detach().requires_grad_(True)
-            if step % 10 == 0:
-                print(f"Step {step}, Loss: {loss.item():.4f}")
-        return x_adv
-    
-    def single_filter_attack(self, sample, lr, epsilon, num_iter, key_filters):
-        x = sample['image'].clone().detach().to(self.trainer.device).unsqueeze(0)
-        m = sample['mask'].clone().detach().to(self.trainer.device).unsqueeze(0)
-        x_adv = x.clone().detach().requires_grad_(True)
-
-        optimizer = torch.optim.Adam([x_adv], lr=lr)
+                delta = x_adv.data - x.data
+                delta.clamp_(-epsilon, epsilon)
+                x_adv.data.copy_((x.data + delta).clamp_(0, 1))
+                # 更新优化器参数
+                optimizer.param_groups[0]['params'][0].data = x_adv
+                
+            print(f"Step {step:3}, LossT,1,2,3: {loss[3].item():.10f} {loss[0].item():.10f} {loss[1].item():.10f} {loss[2].item():.10f}")
         
-        for step in range(num_iter):
-            optimizer.zero_grad()
-            loss = self.loss_total(lamda1=0.1, lamda2=1.0, lamda3=1.0, m=m, x=x, x_adv=x_adv, key_filters=key_filters)
-            loss.backward() # type: ignore
-            
-            optimizer.step()
-            with torch.no_grad():
-                delta = torch.clamp(x_adv - x, -epsilon, epsilon)
-                x_adv = torch.clamp(x + delta, 0, 1).detach().requires_grad_(True)
-            if step % 10 == 0:
-                print(f"Step {step}, Loss: {loss.item():.4f}")
+        
         return x_adv
+
     
     def batch_attack(self, method, output_dir = "./mask-attack/result", **kwargs):
         # Validate the chosen attack method
