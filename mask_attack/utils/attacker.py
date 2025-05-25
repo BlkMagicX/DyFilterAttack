@@ -62,8 +62,8 @@ class Attacker:
                 'params_name': ["epsilon", "alpha", "num_iter"]
             },
             "filter_attack":{
-                'attack_function': self.single_filter_attack,
-                'params_name': ["lr", "epsilon", "num_iter", "key_filters"]
+                'attack_function': self.filter_attack,
+                'params_name': ["lr", "epsilon", "num_iter", "lambda1", "lambda2", "lambda3", "key_filters"]
             }
         }
         # ** 
@@ -149,34 +149,65 @@ class Attacker:
             perturbed_image = torch.clamp(image + delta, 0, 1).detach().requires_grad_(True)
         return perturbed_image    
         
-    def single_filter_attack(self, sample, lr, epsilon, num_iter, lambda1, lambda2, lambda3, key_filters):
-        x = sample['image'].clone().detach().to(self.trainer.device).unsqueeze(0).requires_grad_(True)
-        m = sample['mask'].clone().detach().to(self.trainer.device).unsqueeze(0).requires_grad_(True)
-        x_adv = x.clone().detach().requires_grad_(True)
+    def filter_attack(self, sample, lr, epsilon, num_iter, lambda1, lambda2, lambda3, key_filters):
+        if len(sample['image'].size()) == 3:
+            x = sample['image'].clone().detach().to(self.trainer.device).unsqueeze(0).requires_grad_(True)
+            m = sample['mask'].clone().detach().to(self.trainer.device).unsqueeze(0).requires_grad_(True)
+            random_noise = torch.empty_like(x).uniform_(-epsilon, epsilon)
+            x_adv = (x + random_noise).clamp(0, 1).detach().requires_grad_(True)
+        
+        elif len(sample['image'].size()) == 4:
+            x = sample['image'].clone().detach().to(self.trainer.device).requires_grad_(True)
+            m = sample['mask'].clone().detach().to(self.trainer.device).requires_grad_(True)
+            random_noise = torch.empty_like(x).uniform_(-epsilon, epsilon)
+            x_adv = (x + random_noise).clamp(0, 1).detach().requires_grad_(True)
+        
+        else:
+            raise ValueError("Wrong input image dimensions")
 
+        # lambda2_current = lambda2 * (step / num_iter)  # step 从 0 开始
         optimizer = torch.optim.Adam([x_adv], lr=lr)
+        
+        print(f"{'Loss:':>9}"
+              f"{'loss_total':>16}"
+              f"{'loss_1':>16}"
+              f"{'loss_2':>16}"
+              f"{'loss_3':>16}")
         
         for step in range(num_iter):
             optimizer.zero_grad()
+        
             loss = loss_total(self.trainer, 
                               lambda1=lambda1, lambda2=lambda2, lambda3=lambda3, 
                               m=m, x=x, x_adv=x_adv, key_filters=key_filters)
             total_loss = loss[-1]
             total_loss.backward()
             
+            # 获取梯度并应用掩码
+            with torch.no_grad():
+                # 假设 m 是掩码张量，形状与 x_adv 一致（[B, C, H, W]）
+                if x_adv.grad is not None:
+                    x_adv.grad *= m  # 仅保留掩码区域的梯度（非掩码区域梯度置零）
+            
             # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(x_adv, max_norm=1.0)
             
             optimizer.step()
             with torch.no_grad():
-                delta = x_adv.data - x.data
-                delta.clamp_(-epsilon, epsilon)
-                x_adv.data.copy_((x.data + delta).clamp_(0, 1))
+                # lambda2 = lambda2 + lambda2 * (step / num_iter) # 逐步增强激活差异约束
+                # lambda3 = lambda3
+                # lambda1 = lambda1 - lambda1 * (step / num_iter)  # 初期优先误分类，后期减弱
+                delta = torch.clamp(x_adv.data - x.data, -epsilon, epsilon)
+                x_adv.data = torch.clamp(x.data + delta, 0, 1)
                 # 更新优化器参数
                 optimizer.param_groups[0]['params'][0].data = x_adv
-                
-            print(f"Step {step:3}, LossT,1,2,3: {loss[3].item():.10f} {loss[0].item():.10f} {loss[1].item():.10f} {loss[2].item():.10f}")
-        
+            
+                if step % 10 == 0:
+                    print(f"[{step:>3}/{num_iter:>3}]"
+                        f"{loss[3].item():>16.6f}"
+                        f"{loss[0].item():>16.6f}"
+                        f"{loss[1].item():>16.6f}"
+                        f"{loss[2].item():>16.6f}")
         
         return x_adv
 
@@ -191,44 +222,42 @@ class Attacker:
                 # 动态提取参数并调用攻击函数
                 attack_function = self.method_config[method]['attack_function']
                 params_name = [para_name for para_name in self.method_config[method]['params_name']]
-                params_value = [kwargs[para_name] for para_name in self.method_config[method]['params_name']]
+                params_value = [kwargs[para_name] for para_name in params_name]
             except KeyError as e:
                 raise ValueError(f"Missing required parameter: {e}")
         
+            # 动态生成参数描述（对 key_filters 做特殊处理）
+        param_descriptions = []
+        for para_name, para_value in zip(params_name, params_value):
+            if para_name == "key_filters":
+                pass
+                # param_descriptions.append(f"{para_name}-layers:{len(para_value)}-channels:{total_channels}")
+            else:
+                # 其他参数保留4位小数
+                param_descriptions.append(f"{para_name}-{para_value:.4f}")
+            
         # Create DataLoader for batch processing
-        batch_loader_with_progress = tqdm(
-            self.batch_loader,
-            desc=(
-                f"Processing Batches in {method}-"
-                f"{'-'.join([f'{params_name[para_idx]}-{params_value[para_idx]:.4f}' for para_idx in range(len(params_name))])}"                         
-            ),
-            total=len(self.batch_loader)
-        )
+        desc = f"Processing Batches in {method}-{'-'.join(param_descriptions)}"
+        batch_loader_with_progress = tqdm(self.batch_loader, desc=desc, total=len(self.batch_loader))
         for batch in batch_loader_with_progress:
-            if batch is None:  # Skip empty batches
+            if batch is None:
                 continue
                   
+            # 调用攻击函数（参数顺序需与 params_name 一致）
             perturbed_batch = attack_function(batch, *params_value)
+            # 保存对抗样本（与原代码一致）
             os.makedirs(os.path.join(output_dir, "images"), exist_ok=True)
             os.makedirs(os.path.join(output_dir, "labels"), exist_ok=True)
             for i in range(len(perturbed_batch)):
-                # 单样本处理
                 perturbed_img = perturbed_batch[i].cpu()
                 original_image_path = batch['image_path'][i]
                 original_label_path = batch['label_path'][i]
-                # 张量转图像（批量优化：提前转换整个张量再拆分）
-                perturbed_np = (perturbed_img * 255).clamp(0, 255).byte().numpy()
-                perturbed_np = perturbed_np.transpose(1, 2, 0)  # (H, W, C)
-                # 保存图像
-                custom_image_path = os.path.join(
-                    output_dir, "images", os.path.basename(original_image_path)
-                )
-                Image.fromarray(perturbed_np, mode='RGB').save(custom_image_path)
-                
+                # 张量转图像并保存
+                perturbed_np = (perturbed_img * 255).clamp(0, 255).byte().numpy().transpose(1, 2, 0)
+                custom_image_path = os.path.join(output_dir, "images", os.path.basename(original_image_path))
+                Image.fromarray(perturbed_np).save(custom_image_path)
                 # 复制标签文件
-                custom_labels_path = os.path.join(
-                    output_dir, "labels", os.path.basename(original_label_path)
-                )
+                custom_labels_path = os.path.join(output_dir, "labels", os.path.basename(original_label_path))
                 shutil.copy2(original_label_path, custom_labels_path)
 
             

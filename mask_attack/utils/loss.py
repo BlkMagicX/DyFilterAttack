@@ -15,35 +15,29 @@ def loss_total(trainer, lambda1, lambda2, lambda3, m, x, x_adv, key_filters):
             if channel_idx:
                 activation_x = activations_x[layer_name][:, channel_idx]  # shape: [B, H, W]
                 activation_x_adv = activations_x_adv[layer_name][:, channel_idx]
-                activation_avg = (activation_x + activation_x_adv) / 2.0
+                activation_avg = (activation_x - activation_x_adv) / 2.0
                 l2_norm_squared = torch.sum(activation_avg ** 2, dim=[1, 2])
                 loss += torch.mean(l2_norm_squared)
         return loss
     
-    def loss_misclassification(): # 这是嵌套在 loss_total 内部的函数
+    def loss_misclassification():
         def get_class_logits(model_raw_output, trainer):
-            m = trainer.model[-1]
-            nc = m.nc  # 类别数量
-            reg_max_x4 = m.reg_max * 4 # DFL 部分的通道数
-            no_total = nc + reg_max_x4 # 每个锚点/位置的总输出通道数
-
+            model = trainer.model[-1]
+            nc = model.nc
+            reg_max_x4 = model.reg_max * 4
+            no_total = nc + reg_max_x4
             feats_list = model_raw_output[1] if isinstance(model_raw_output, (tuple, list)) and len(model_raw_output) == 2 else model_raw_output
             batch_s = feats_list[0].shape[0]
-
             _dist_logits, class_score_logits = torch.cat([xi.view(batch_s, no_total, -1) for xi in feats_list], 2).split((reg_max_x4, nc), 1)
-            
             return class_score_logits.permute(0, 2, 1).contiguous()
-
         pred_logits_x = get_class_logits(x_pred, trainer.model)
         pred_logits_x_adv = get_class_logits(x_adv_pred, trainer.model)
-
-        target_probs_from_x = torch.sigmoid(pred_logits_x).detach()
-        
+        # 原始标签（真实类别）作为目标
+        target_labels = torch.sigmoid(pred_logits_x).detach()  # 原始输出概率
+        # 攻击目标：最大化误分类损失（取负 BCE 损失）
         bce_criterion = nn.BCEWithLogitsLoss(reduction="sum")
-        
-        similarity_bce_loss = bce_criterion(pred_logits_x_adv, target_probs_from_x)
-        
-        return similarity_bce_loss
+        misclassification_loss = bce_criterion(pred_logits_x_adv, target_labels)
+        return misclassification_loss
         
     from analyzer.utils import SaveFeatures
     from analyzer.utils import LayerConfig

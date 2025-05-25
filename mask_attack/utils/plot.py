@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import torch
 from PIL import Image
 import matplotlib.pyplot as plt
 from ipywidgets import Button, HBox, VBox, Output
@@ -46,7 +47,20 @@ def draw_boxes(img, predictions, ax, title=""):
     ax.set_title(title)
     ax.axis('off')    
     
-    
+# Function to visualize a pair of images
+def visualize_single_image(model, index, dataset):
+    clear_output() 
+    img = dataset[index]["image"]
+    preds = model(img.unsqueeze(0))
+    results = [
+        {'box': pred[:4], 'score': pred[4], 'label': model.names[int(pred[5])]}
+        for pred in preds[0].boxes.data
+    ]
+    # Create a figure with two subplots
+    fig, ax = plt.subplots(1, 1, figsize=(30, 14))
+    draw_boxes(img.squeeze(), results, ax, title="Image Predictions")
+    plt.show()
+
 # Function to visualize a pair of images
 def visualize_image_pair(model, index, origin_dataset, attacked_dataset):
     clear_output() 
