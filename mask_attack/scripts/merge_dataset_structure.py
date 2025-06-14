@@ -3,8 +3,8 @@ import shutil
 from tqdm import tqdm
 
 def merge_dataset_structure(
-    source_base: str = "E://bmx/YoloCAM/mask_attack/result",
-    target_base: str = "E://bmx/YoloCAM/mask_attack/no_classes_result"
+    source_base: str = "E://bmx/DyFilterAttack/mask_attack/result",
+    target_base: str = "E://bmx/DyFilterAttack/mask_attack/no_classes_result"
 ):
     """
     自动合并攻击数据集（自动检测攻击方法目录）
