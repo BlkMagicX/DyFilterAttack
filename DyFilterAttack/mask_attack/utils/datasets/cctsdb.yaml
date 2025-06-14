@@ -1,0 +1,13 @@
+
+path: E:/bmx/ultralytics-CCTSDB/data/CCTSDB # dataset root dir
+train: train.txt  # train images (relative to 'path') 118287 images
+val: val.txt  # val images (relative to 'path') 5000 images
+ 
+# number of classes
+nc: 3
+ 
+# class names
+names:
+  0: warning
+  1: prohibitory
+  2: mandatory
