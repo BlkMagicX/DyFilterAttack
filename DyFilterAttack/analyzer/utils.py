@@ -22,17 +22,18 @@ class SaveFeatures:
         self.hooks = []
     def hook_fn(self, module, input, output, path) -> None:
         self.features[path] = output
-    def register_hooks(self, module, parent_path):
+    def register_hooks(self, module, parent_path, verbose):
         for name, child in module.named_children():
             current_path = f"{parent_path}.{name}" if parent_path else name
             # if isinstance(child, torch.nn.BatchNorm2d):
-            # print(f"Registering Hook: {current_path})"
+            if verbose:
+                print(f"Registering Hook: {current_path}")
             hook = child.register_forward_hook(
                 hook=partial(self.hook_fn, path=current_path)
             )
             self.hooks.append(hook)
             # 递归调用时保持 parent_path 不变
-            self.register_hooks(child, current_path)
+            self.register_hooks(child, current_path, verbose)
     def get_features(self):
         return self.features
     def close(self):

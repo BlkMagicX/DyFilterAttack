@@ -4,12 +4,11 @@ DyFilterAttack/pytorch_grad_cam/__pycache__
 DyFilterAttack/mask_attack/__pycache__
 DyFilterAttack/mask_attack/result/
 DyFilterAttack/mask_attack/no_classes/
+DyFilterAttack/analyzer/result/
 DyFilterAttack/pytorch_grad_cam/.ipynb_checkpoints
 DyFilterAttack/pytorch_grad_cam/utils/__pycache__
 DyFilterAttack/pytorch_grad_cam/feature_factorization/__pycache__
 DyFilterAttack/pytorch_grad_cam/metrics/__pycache__
-DyFilterAttack/mask-attack/
-DyFilterAttack/mask_attack/result/
-DyFilterAttack/test/
+DyFilterAttack/testset/
 DyFilterAttack/filter/
 DyFilterAttack/runs/
