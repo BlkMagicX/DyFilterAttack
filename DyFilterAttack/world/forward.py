@@ -1,19 +1,18 @@
-import os
-import cv2
 import numpy as np
 import torch
-from pathlib import Path
-from PIL import Image
-from ultralytics import YOLOWorld
-from DyFilterAttack.analyzer.utils import SaveFeatures
-from ultralytics.utils import ops
 import warnings
+from pathlib import Path
+from ultralytics import YOLOWorld
+from ultralytics.utils import ops
+from utils.savefeatures import SaveFeatures
+
+# sys.modules.clear()
 
 
 def setup_model(model_path, verbose):
     """
     Initialize YOLO model and image for inference.
-    
+
     Args:
         model_path (str): Path to the trained YOLO model.
         verbose (bool): Whether to print additional information during initialization.
@@ -30,28 +29,36 @@ def setup_model(model_path, verbose):
     if "-world" in path.stem and path.suffix in {".pt", ".yaml", ".yml"}:
         yolo = YOLOWorld(path, verbose=verbose)
         yolo = yolo.to(torch.device(device="cuda" if torch.cuda.is_available() else "cpu"))
-        
+
         key_layer_idx = {
             "backbone_c2f1": 2,
             "backbone_c2f2": 4,
             "backbone_c2f3": 6,
-            "backbone_c2f4": 8, 
+            "backbone_c2f4": 8,
             "backbone_sppf": 9,
             "neck_c2f1": 15,
             "neck_c2f2": 19,
             "neck_c2f3": 22,
-            "detect_head": 23
+            "detect_head": 23,
         }
-        
+
         layers = {layer: yolo.model.model[idx] for layer, idx in key_layer_idx.items()}
-        
+
     return yolo, layers
 
 
-def extract_features(yolo, layers, image_path, extract_module_name: str):
+def choose_extract_module(layers, extract_module_name):
+    # Hook for extracting features
+    save_feats = SaveFeatures()
+    extract_module = layers[extract_module_name]
+    save_feats.register_hooks(extract_module, parent_path=extract_module_name, verbose=True)
+    return save_feats, extract_module
+
+
+def extract_features(yolo, image_path, save_feats):
     """
     Extract features from the image using the YOLO model.
-    
+
     Args:
         yolo (YOLOWorld): Initialized YOLO model.
         layers (dict): Dictionary containing layers for feature extraction.
@@ -62,16 +69,11 @@ def extract_features(yolo, layers, image_path, extract_module_name: str):
         extract_module_raw_feats (dict): Extracted features from the detection head.
         extract_module (torch.nn.Module): The specified module from which the features are extracted.
     """
-    # Hook for extracting features
-    save_feats = SaveFeatures()
-    extract_module = layers[extract_module_name]  # Directly get module from layers using name
-    save_feats.register_hooks(module=extract_module, parent_path=extract_module_name, verbose=True)
-    
-    # Perform inference on the input image
-    # plot det result[B=0]
+
     print("\nextract_features...")
     results = yolo.predict(image_path)
     result = results[0]
+
     for det in result.boxes:
         xmin, ymin, xmax, ymax = det.xyxy[0]
         conf = det.conf  # Confidence
@@ -79,45 +81,42 @@ def extract_features(yolo, layers, image_path, extract_module_name: str):
         class_name = result.names[cls[0].item()]
         print(f"bbox: {xmin}, {ymin}, {xmax}, {ymax}, conf: {conf}, class: {class_name}")
 
-    image = Image.fromarray(result.plot()[:, :, ::-1])
-    image.show()
-    image.save('./DyFilterAttack/world/result/bus_result.jpg')
-    
-    features = save_feats.get_features()
+    extract_module_raw_feats = save_feats.features
 
-    return features, extract_module
+    return extract_module_raw_feats
 
 
-def extract_world_y_det(world, layers, detect_head_raw_feats):
+def extract_world_y_det(world, layers, save_feats):
     """
     Extract the y_det and y_det_target from the model outputs.
-    
+
     Args:
         layers (dict): Dictionary containing the layers for feature extraction.
-        detect_head_raw_feats (dict): Raw features extracted from the detect head module.
+        save_feats.features (dict): Raw features extracted from the detect head module.
 
     Returns:
         y_det_orig (Tensor): The original detection tensor with max class probabilities.
         y_det_target (Tensor): The detection tensor with second max class probabilities.
     """
     # Retrieve the actual module object using the module name
-    detect_head = layers['detect_head']
-    
+    detect_head = layers["detect_head"]
+
     # Extract necessary feature values for further processing
     nl = detect_head.nl
-    nc, reg_max =  detect_head.nc, detect_head.reg_max
+    nc, reg_max = detect_head.nc, detect_head.reg_max
     no = nc + 4 * reg_max
     assert no == detect_head.no
-    
-    # process1 
+
+    # process1
     # text -> (B, nc, embed_dim)
     # image -> (B, embed_dim, H, W)
     # cv4 contrast(iamge, text) -> (B, nc, H, W)
     # cv2(image) -> (B, reg_max * 4, H, W)
     # cat_result -> (B, nc + reg_max * 4, H ,W) -> (B, no, H ,W)
     # x[i] -> cat_result[i] (i = 1, 2, nl)
-    cv2_raw_feats = [detect_head_raw_feats[f'detect_head.cv2.{i}'] for i in range(nl)]
-    cv4_raw_feats = [detect_head_raw_feats[f'detect_head.cv4.{i}'] for i in range(nl)]
+    features = save_feats.features
+    cv2_raw_feats = [features[f"detect_head.cv2.{i}"] for i in range(nl)]
+    cv4_raw_feats = [features[f"detect_head.cv4.{i}"] for i in range(nl)]
 
     # process2 (_inference)
     # flat(x[i]) -> (B, no, H * W)
@@ -132,7 +131,7 @@ def extract_world_y_det(world, layers, detect_head_raw_feats):
     raw_cls = flatten_raw_feats[:, reg_max * 4 :]
 
     # Decode bounding boxes and logits (classification)
-    dfl_feats = detect_head_raw_feats['detect_head.dfl']
+    dfl_feats = features["detect_head.dfl"]
     dbox = detect_head.decode_bboxes(dfl_feats, detect_head.anchors.unsqueeze(0)) * detect_head.strides
     logit_cls = raw_cls
     sigmoid_cls = logit_cls.sigmoid()
@@ -160,9 +159,9 @@ def extract_world_y_det(world, layers, detect_head_raw_feats):
 
     # Initialize a tensor for y_det
     y_det = raw_cls.new_zeros(raw_cls.shape[0], raw_cls.shape[1], max_out)
-    for b, idx in enumerate(keep_idxs):  
+    for b, idx in enumerate(keep_idxs):
         if idx.numel() > 0:
-            y_det[b, :, :idx.numel()] = flatten_raw_feats[:raw_cls.shape[0], raw_box.shape[1]:, idx]
+            y_det[b, :, : idx.numel()] = flatten_raw_feats[: raw_cls.shape[0], raw_box.shape[1] :, idx]
 
     # Get the first max class index (for y_det_orig)
     first_max_cls_idx = torch.argmax(y_det, dim=1)  # (B, max_out)
@@ -172,37 +171,67 @@ def extract_world_y_det(world, layers, detect_head_raw_feats):
     _, topk_indices = torch.topk(y_det, 2, dim=1)
     second_max_cls_idx = topk_indices[:, 1]  # (B, max_out)
     y_det_target = y_det[torch.arange(y_det.shape[0]), second_max_cls_idx, torch.arange(y_det.shape[2])]  # (B, max_out)
-    
+
     print("\nextract_y_det...")
     print("shapes:")
-    print(f'y_det_orig       {y_det_orig.size()}')
-    print(f'y_det_target     {y_det_target.size()}')
+    print(f"y_det_orig       {y_det_orig.size()}")
+    print(f"y_det_target     {y_det_target.size()}")
+    # print(f"gradients        {gradients.size()}")
     print("indexs:")
-    print(f'y_det_orig       {first_max_cls_idx}')
-    print(f'y_det_target     {second_max_cls_idx}')
+    print(f"y_det_orig       {first_max_cls_idx}")
+    print(f"y_det_target     {second_max_cls_idx}")
     print("logits:")
-    print(f'y_det_orig       {y_det_orig}')
-    print(f'y_det_target     {y_det_target}')
+    print(f"y_det_orig       {y_det_orig}")
+    print(f"y_det_target     {y_det_target}")
     print("sigmoid:")
-    print(f'y_det_orig       {y_det_orig.sigmoid()}')
-    print(f'y_det_target     {y_det_target.sigmoid()}')
+    print(f"y_det_orig       {y_det_orig.sigmoid()}")
+    print(f"y_det_target     {y_det_target.sigmoid()}")
 
     return y_det_orig, y_det_target
 
 
+def compute_gradients_y_det_and_activation(layer_name, y_det_orig, y_det_target, save_feats):
+    """
+    Compute gradients for the specified layer based on y_det_orig and y_det_target.
+
+    Args:
+        layer_name (str): The name of the layer to compute gradients for.
+        y_det_orig (Tensor): The original detection tensor with max class probabilities.
+        y_det_target (Tensor): The detection tensor with second max class probabilities.
+        save_feats (SaveFeatures): Object that contains hooks for capturing activations and gradients.
+
+    Returns:
+        gradients (dict): The gradients of the selected layer with respect to y_det.
+    """
+    y_det_orig.requires_grad_(True)
+    y_det_target.requires_grad_(True)
+
+    loss = y_det_orig[0][0]
+    loss.backward()
+
+    gradients = save_feats.gradients
+    print(gradients.keys())
+
+    if layer_name in gradients:
+        layer_gradients = gradients[layer_name]
+    else:
+        layer_gradients = None
+
+    return layer_gradients
+
+
 if __name__ == "__main__":
-    
-    model_path = './DyFilterAttack/models/yolov8s-world.pt'
-    image_path = './DyFilterAttack/testset/bus.jpg'
-    
+
+    model_path = "./DyFilterAttack/models/yolov8s-world.pt"
+    image_path = "./DyFilterAttack/testset/bus.jpg"
+
     # Initialize model and image
     yolo_world, world_layers = setup_model(model_path=model_path, verbose=True)
-    
-    extract_module_raw_feats, extract_module = extract_features(yolo=yolo_world, 
-                                                                layers=world_layers, 
-                                                                image_path=image_path, 
-                                                                extract_module_name='detect_head')
-    
-    y_det_orig, y_det_target = extract_world_y_det(world=yolo_world,
-                                                   layers=world_layers,
-                                                   detect_head_raw_feats=extract_module_raw_feats)
+
+    save_feats, extract_module = choose_extract_module(layers=world_layers, extract_module_name='detect_head')
+    activations = extract_features(yolo=yolo_world, image_path=image_path, save_feats=save_feats)
+    y_det_orig, y_det_target = extract_world_y_det(world=yolo_world, layers=world_layers, save_feats=save_feats)
+    layer_gradients = compute_gradients_y_det_and_activation(
+        layer_name='detect_head.cv2.0', y_det_orig=y_det_orig, y_det_target=y_det_target, save_feats=save_feats
+    )
+    print(layer_gradients)
