@@ -19,3 +19,10 @@ DyFilterAttack/mask_attack/utils/plot.py
 DyFilterAttack/mask_attack/utils/datasets/__init__.py
 DyFilterAttack/mask_attack/utils/datasets/cctsdb.py
 DyFilterAttack/mask_attack/utils/datasets/gtsrb.py
+DyFilterAttack/world/__init__.py
+DyFilterAttack/world/attack.py
+DyFilterAttack/world/decouple.py
+DyFilterAttack/world/forward.py
+DyFilterAttack/world/loss.py
+DyFilterAttack/world/mask.py
+DyFilterAttack/world/weight.py
