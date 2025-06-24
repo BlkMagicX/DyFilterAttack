@@ -8,7 +8,6 @@ from ultralytics import YOLOWorld
 from DyFilterAttack.analyzer.utils import SaveFeatures
 from ultralytics.utils import ops
 import warnings
-import matplotlib.pyplot as plt
 
 
 def setup_model(model_path, verbose):
@@ -84,52 +83,64 @@ def extract_features(yolo, layers, image_path, extract_module_name: str):
     image.show()
     image.save('./DyFilterAttack/world/result/bus_result.jpg')
     
-    extract_module_raw_feats = save_feats.get_features()
+    features = save_feats.get_features()
 
-    return extract_module_raw_feats, extract_module
+    return features, extract_module
 
 
-def extract_y_det(layers, extract_module_name, extract_module_raw_feats):
+def extract_world_y_det(world, layers, detect_head_raw_feats):
     """
     Extract the y_det and y_det_target from the model outputs.
     
     Args:
         layers (dict): Dictionary containing the layers for feature extraction.
-        extract_module_name (str): Name of the module from which to extract features.
-        extract_module_raw_feats (dict): Raw features extracted from the specified module.
+        detect_head_raw_feats (dict): Raw features extracted from the detect head module.
 
     Returns:
         y_det_orig (Tensor): The original detection tensor with max class probabilities.
         y_det_target (Tensor): The detection tensor with second max class probabilities.
     """
     # Retrieve the actual module object using the module name
-    extract_module = layers[extract_module_name]
+    detect_head = layers['detect_head']
     
     # Extract necessary feature values for further processing
-    nl = extract_module.nl
-    nc, reg_max =  extract_module.nc, extract_module.reg_max
+    nl = detect_head.nl
+    nc, reg_max =  detect_head.nc, detect_head.reg_max
     no = nc + 4 * reg_max
-    assert no == extract_module.no
+    assert no == detect_head.no
     
-    # Process 1: Extract raw features for CV2 and CV4
-    cv2_raw_feats = [extract_module_raw_feats[f'{extract_module_name}.cv2.{i}'] for i in range(nl)]
-    cv4_raw_feats = [extract_module_raw_feats[f'{extract_module_name}.cv4.{i}'] for i in range(nl)]
+    # process1 
+    # text -> (B, nc, embed_dim)
+    # image -> (B, embed_dim, H, W)
+    # cv4 contrast(iamge, text) -> (B, nc, H, W)
+    # cv2(image) -> (B, reg_max * 4, H, W)
+    # cat_result -> (B, nc + reg_max * 4, H ,W) -> (B, no, H ,W)
+    # x[i] -> cat_result[i] (i = 1, 2, nl)
+    cv2_raw_feats = [detect_head_raw_feats[f'detect_head.cv2.{i}'] for i in range(nl)]
+    cv4_raw_feats = [detect_head_raw_feats[f'detect_head.cv4.{i}'] for i in range(nl)]
 
-    # Process 2: Flatten and concatenate features
+    # process2 (_inference)
+    # flat(x[i]) -> (B, no, H * W)
+    # cat(x) -> (B, C, H0 * W0 + H1 * W1 + H2 * W2)
+    # split(x) -> bbox(B, 4 * reg_max, H0 * W0 + H1 * W1 + H2 * W2), cls(logit)(B, nc, H0 * W0 + H1 * W1 + H2 * W2)
+    # docode(bbox) -> dbox
+    # logit(cls) -> sigmoid(cls)
+    # y -> cat(dbox, cls)
     cat_raw_feats = [torch.cat((cv2_raw_feats[i], cv4_raw_feats[i]), 1) for i in range(nl)]
     flatten_raw_feats = torch.cat([cat_raw_feat.view(cat_raw_feats[0].shape[0], nc + 4 * reg_max, -1) for cat_raw_feat in cat_raw_feats], 2)
     raw_box = flatten_raw_feats[:, : reg_max * 4]
     raw_cls = flatten_raw_feats[:, reg_max * 4 :]
 
     # Decode bounding boxes and logits (classification)
-    dfl_feats = extract_module_raw_feats[f'{extract_module_name}.dfl']
-    dbox = extract_module.decode_bboxes(dfl_feats, extract_module.anchors.unsqueeze(0)) * extract_module.strides
+    dfl_feats = detect_head_raw_feats['detect_head.dfl']
+    dbox = detect_head.decode_bboxes(dfl_feats, detect_head.anchors.unsqueeze(0)) * detect_head.strides
     logit_cls = raw_cls
     sigmoid_cls = logit_cls.sigmoid()
 
-    # Apply non-max suppression
+    # process3 (construct y_det_orig and y_de_target)
+    # obtain the specific cls indices selected by non_max_suppression
     preds = torch.cat([dbox, sigmoid_cls], 1)  # (B, 4+nc, N)
-    predictor = yolo.predictor
+    predictor = world.predictor
     detections, keep_idxs = ops.non_max_suppression(
         preds,
         predictor.args.conf,
@@ -185,13 +196,13 @@ if __name__ == "__main__":
     image_path = './DyFilterAttack/testset/bus.jpg'
     
     # Initialize model and image
-    yolo, yolo_layers = setup_model(model_path=model_path, verbose=True)
+    yolo_world, world_layers = setup_model(model_path=model_path, verbose=True)
     
-    extract_module_raw_feats, extract_module = extract_features(yolo=yolo, 
-                                                                layers=yolo_layers, 
+    extract_module_raw_feats, extract_module = extract_features(yolo=yolo_world, 
+                                                                layers=world_layers, 
                                                                 image_path=image_path, 
                                                                 extract_module_name='detect_head')
     
-    y_det_orig, y_det_target = extract_y_det(layers=yolo_layers,
-                                             extract_module_name='detect_head',
-                                             extract_module_raw_feats=extract_module_raw_feats)
+    y_det_orig, y_det_target = extract_world_y_det(world=yolo_world,
+                                                   layers=world_layers,
+                                                   detect_head_raw_feats=extract_module_raw_feats)
