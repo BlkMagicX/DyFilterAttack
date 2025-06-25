@@ -1,13 +1,8 @@
-import numpy as np
 import torch
-import warnings
-from pathlib import Path
-from ultralytics import YOLOWorld
 from ultralytics.utils import ops
 from DyFilterAttack.analyzer.utils import SaveFeatures
 from PIL import Image
 import torchvision.transforms as T
-import numpy as np
 
 # sys.modules.clear()
 
@@ -23,44 +18,6 @@ def preprocess_image(image_path, device):
     image_tensor = transform(image).unsqueeze(0).to(device)
     image_tensor.requires_grad = True
     return image_tensor
-
-
-def setup_model(model_path, verbose=True):
-    """
-    Initialize YOLO model and image for inference.
-
-    Args:
-        model_path (str): Path to the trained YOLO model.
-        verbose (bool): Whether to print additional information during initialization.
-
-    Returns:
-        yolo (YOLOWorld): Initialized YOLO model.
-        layers (dict): Dictionary containing the layers used in the YOLO model for feature extraction.
-    """
-    print("\nsetup_model...")
-    warnings.filterwarnings(action="ignore")
-    warnings.simplefilter(action="ignore")
-
-    path = Path(model_path if isinstance(model_path, (str, Path)) else "")
-    if "-world" in path.stem and path.suffix in {".pt", ".yaml", ".yml"}:
-        world = YOLOWorld(path, verbose=verbose)
-        world = world.to(torch.device(device="cuda" if torch.cuda.is_available() else "cpu"))
-
-        key_layer_idx = {
-            "backbone_c2f1": 2,
-            "backbone_c2f2": 4,
-            "backbone_c2f3": 6,
-            "backbone_c2f4": 8,
-            "backbone_sppf": 9,
-            "neck_c2f1": 15,
-            "neck_c2f2": 19,
-            "neck_c2f3": 22,
-            "detect_head": 23,
-        }
-
-        layers = {layer: world.model.model[idx] for layer, idx in key_layer_idx.items()}
-
-    return world, layers
 
 
 # ! Deprecated
