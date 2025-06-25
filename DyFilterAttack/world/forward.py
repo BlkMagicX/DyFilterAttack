@@ -211,38 +211,38 @@ def extract_static_world_y_det(world, layers, save_feats):
 
 def compute_gradients_y_det_and_activation(world, image_tensor, target_layer_name):
     """
-    在“固定目标”策略下计算梯度。
+    Compute gradients under the “fixed-target” policy.
 
     Args:
-        world (YOLOWorld): 模型。
-        image_tensor (Tensor): 当前的对抗样本张量。
-        target_indices (Tensor): 从干净图像上得到的、固定的目标索引。
-        target_layer_name (str): 目标层的名称。
+        world (YOLOWorld): Model.
+        image_tensor (Tensor): Current adversarial sample.
+        target_layer_name (str): Name of the layer to attack.
 
     Returns:
         Tuple: (grad_A_orig, grad_A_target, activations['value'])
     """
-
     world.zero_grad()
+
+    # Capture the activation of the target layer and keep its grad
+    activations = {}
 
     def forward_hook(module, input, output):
         output.retain_grad()
-        activations['value'] = output
+        activations["value"] = output
 
-    activations = {}
-    module_path = target_layer_name.split('.')
     target_module = world
-    for part in module_path:
+    for part in target_layer_name.split("."):
         target_module = getattr(target_module, part)
     handle = target_module.register_forward_hook(forward_hook)
 
-    # N: num of anchors
+    # Forward pass (with graph) and NMS
     world.predictor = world._smart_load("predictor")(_callbacks=world.callbacks)
     world.predictor.setup_model(model=world.model, verbose=False)
     predictor = world.predictor
 
-    preds, _ = world.model(image_tensor)  # pred (B, 4+nc, N)
-    raw_cls = preds[:, 4:, :]  #  logits (B, nc, N)
+    preds, _ = world.model(image_tensor)  # (B, 4+nc, N)
+    raw_cls = preds[:, 4:, :]  # (B, nc, N)
+
     detections, keep_idxs = ops.non_max_suppression(
         preds,
         predictor.args.conf,
@@ -256,53 +256,55 @@ def compute_gradients_y_det_and_activation(world, image_tensor, target_layer_nam
         return_idxs=True,
     )
 
+    # Pad variable-length indices to max_out
     max_out = max(idx.numel() for idx in keep_idxs)
-
-    nms_idxs = raw_cls.new_zeros(raw_cls.shape[0], max_out, dtype=torch.long)  # (B, max_out)
-    mask = torch.zeros(raw_cls.shape[0], max_out, dtype=torch.bool, device=raw_cls.device)
+    nms_idxs = raw_cls.new_zeros(raw_cls.shape[0], max_out, dtype=torch.long)
+    valid_mask = torch.zeros(raw_cls.shape[0], max_out, dtype=torch.bool, device=raw_cls.device)
 
     for b, ids in enumerate(keep_idxs):
-        if ids.numel() == 0:
-            continue
-        nms_idxs[b, : ids.numel()] = ids
-        mask[b, : ids.numel()] = True
+        if ids.numel():
+            nms_idxs[b, : ids.numel()] = ids
+            valid_mask[b, : ids.numel()] = True
 
-    nms_idxs = nms_idxs.unsqueeze(1).expand(-1, raw_cls.shape[1], -1)  # (B, nc, max_out)
-    y_det = torch.gather(raw_cls, 2, nms_idxs)  # (B, nc, max_out)
-    y_det = y_det.masked_fill(~mask.unsqueeze(1), 0.0)
-    nms_idxs = nms_idxs[:, 0, :]
+    gather_idx = nms_idxs.unsqueeze(1).expand(-1, raw_cls.shape[1], -1)  # (B, nc, max_out)
+    y_det = torch.gather(raw_cls, 2, gather_idx).masked_fill(~valid_mask.unsqueeze(1), 0.0)
 
-    if y_det.shape[2] == 0:  # 如果没有检测到任何目标
-        print("Warning: No targets were provided to attack.")
+    if y_det.shape[2] == 0:  # no detections
+        print("Warning: no targets to attack.")
         handle.remove()
-        return None, None, activations.get('value')
+        return None, None, activations.get("value")
 
-    _, topk_indices = torch.topk(y_det, 2, dim=1)
+    # Pick top-1 / top-2 class scores per detection
+    _, topk_idx = torch.topk(y_det, 2, dim=1)
+    y_det_orig = y_det.gather(1, topk_idx[:, :1, :]).squeeze(1)  # (B, max_out)
+    y_det_target = y_det.gather(1, topk_idx[:, 1:, :]).squeeze(1)  # (B, max_out)
 
-    y_det_orig = y_det.gather(1, topk_indices[:, :1, :]).squeeze(1)  # Shape: [1, num_fixed_targets]
-    y_det_target = y_det.gather(1, topk_indices[:, 1:, :]).squeeze(1)  # Shape: [1, num_fixed_targets]
+    # --- per-scalar gradients ---
+    A = activations["value"]  # (B, C, H, W)
+    Bsz, Cch, H, W = A.shape
+    grad_orig = A.new_zeros(Bsz, max_out, Cch, H, W)
+    grad_tgt = A.new_zeros(Bsz, max_out, Cch, H, W)
 
-    total_loss_orig = y_det_orig.sum()
-    total_loss_target = y_det_target.sum()
+    for b in range(Bsz):
+        for n in range(max_out):
+            if not valid_mask[b, n]:
+                continue
 
-    total_loss_orig = y_det_orig.sum()
-    total_loss_target = y_det_target.sum()
+            # grad of top-1 score
+            world.zero_grad(set_to_none=True)
+            torch.autograd.grad(y_det_orig[b, n], A, retain_graph=True)
+            grad_orig[b, n] = A.grad[b].detach()
+            A.grad.zero_()
 
-    print(f"\nScores for fixed targets (sum): orig={total_loss_orig.item()}, target={total_loss_target.item()}")
+            # grad of top-2 score
+            torch.autograd.grad(y_det_target[b, n], A, retain_graph=True)
+            grad_tgt[b, n] = A.grad[b].detach()
+            A.grad.zero_()
 
-    # backforward
-    total_loss_orig.backward(retain_graph=True)
-    grad_orig_A = activations['value'].grad.clone()
-
-    world.zero_grad()
-    total_loss_target.backward()
-    grad_target_A = activations['value'].grad.clone()
-
-    A_value = activations.get('value')
     handle.remove()
-    print("Successfully computed gradients on fixed targets.")
+    print("Gradients computed.")
 
-    return grad_orig_A, grad_target_A, A_value
+    return grad_orig, grad_tgt, A.detach()
 
 
 if __name__ == "__main__":
@@ -323,6 +325,14 @@ if __name__ == "__main__":
         world=yolo_world, image_tensor=image_tensor, target_layer_name='model.model.22.cv2'
     )
 
-    print(grad_orig_A.size())
-    print(grad_target_A.size())
-    print(A_value.size())
+    print('\nsize:')
+    print(f'grad_orig_A {grad_orig_A.size()}')
+    print(f'grad_target_A {grad_target_A.size()}')
+    print(f'A_value {A_value.size()}')
+
+    # print('\nvalue: ')
+    # print('grad idx:[B=0, N=0, C=0, :, :]')
+    # print(f'grad_orig_A {grad_orig_A[0, 0, 0, :, :]}')
+    # print(f'grad_target_A {grad_target_A[0, 0, 0, :, :]}')
+    # print('grad idx:[B=0, C=0, :, :]')
+    # print(f'A_value {A_value[0, 0, :, :]}')
