@@ -91,7 +91,7 @@ def compute_spatial_map(grad_orig):
 
         grad_abs = torch.abs(grad)  # (B, C, H, W)
 
-        grad_max = torch.max(grad_abs, dim=(2, 3), keepdim=True)[0]  # (B, C, 1, 1)
+        grad_max = torch.max(torch.max(grad_abs, dim=2, keepdim=True)[0], dim=3, keepdim=True)[0]  # (B, C, 1, 1)
         
         s_k[key] = grad_abs / (grad_max + 1e-8)  # (B, C, H, W)
 
@@ -142,9 +142,30 @@ if __name__ == "__main__":
     )
 
     grad_orig, grad_target = compute_gradients(y_det_orig, y_det_target, extract_module_raw_feats)
-
+    
     w_k_pos, w_k_neg = compute_channel_weights(grad_orig, grad_target)
 
     s_k = compute_spatial_map(grad_orig)
 
     m_k_pos, m_k_neg = compute_mask(w_k_pos, w_k_neg, s_k)
+    
+    # Debug
+    print("\nGradient shapes:")
+    for key in grad_orig.keys():
+        if grad_orig[key] is not None:
+            print(f"grad_orig[{key}]: {grad_orig[key].shape}")
+            print(f"grad_target[{key}]: {grad_target[key].shape}")
+
+    print("\nChannel weight shapes:")
+    for key in w_k_pos.keys():
+        print(f"w_k_pos[{key}]: {w_k_pos[key].shape}")
+        print(f"w_k_neg[{key}]: {w_k_neg[key].shape}")
+
+    print("\nSpatial map shapes:")
+    for key in s_k.keys():
+        print(f"s_k[{key}]: {s_k[key].shape}")
+
+    print("\nMask shapes:")
+    for key in m_k_pos.keys():
+        print(f"m_k_pos[{key}]: {m_k_pos[key].shape}")
+        print(f"m_k_neg[{key}]: {m_k_neg[key].shape}")
