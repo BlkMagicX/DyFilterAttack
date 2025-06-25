@@ -283,7 +283,7 @@ def compute_gradients_y_det_and_activation(world, image_tensor, target_layer_nam
     A = activations["value"]  # (B, C, H, W)
     Bsz, Cch, H, W = A.shape
     grad_orig = A.new_zeros(Bsz, max_out, Cch, H, W)
-    grad_tgt = A.new_zeros(Bsz, max_out, Cch, H, W)
+    grad_target = A.new_zeros(Bsz, max_out, Cch, H, W)
 
     for b in range(Bsz):
         for n in range(max_out):
@@ -298,13 +298,13 @@ def compute_gradients_y_det_and_activation(world, image_tensor, target_layer_nam
 
             # grad of top-2 score
             torch.autograd.grad(y_det_target[b, n], A, retain_graph=True)
-            grad_tgt[b, n] = A.grad[b].detach()
+            grad_target[b, n] = A.grad[b].detach()
             A.grad.zero_()
 
     handle.remove()
     print("Gradients computed.")
 
-    return grad_orig, grad_tgt, A.detach()
+    return grad_orig, grad_target, A.detach()
 
 
 if __name__ == "__main__":
@@ -321,13 +321,13 @@ if __name__ == "__main__":
     # y_det_orig, y_det_target = extract_static_world_y_det(world=yolo_world, layers=world_layers, save_feats=save_feats)
     # compute_gradients_y_det_and_activation(layer_name='detect_head.cv2.0', y_det_orig=y_det_orig, y_det_target=y_det_target, save_feats=save_feats)
 
-    grad_orig_A, grad_target_A, A_value = compute_gradients_y_det_and_activation(
+    grad_orig, grad_target, A_value = compute_gradients_y_det_and_activation(
         world=yolo_world, image_tensor=image_tensor, target_layer_name='model.model.22.cv2'
     )
 
     print('\nsize:')
-    print(f'grad_orig_A {grad_orig_A.size()}')
-    print(f'grad_target_A {grad_target_A.size()}')
+    print(f'grad_orig_A {grad_orig.size()}')
+    print(f'grad_target_A {grad_target.size()}')
     print(f'A_value {A_value.size()}')
 
     # print('\nvalue: ')
