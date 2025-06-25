@@ -4,12 +4,28 @@ import warnings
 from pathlib import Path
 from ultralytics import YOLOWorld
 from ultralytics.utils import ops
-from utils.savefeatures import SaveFeatures
+from DyFilterAttack.analyzer.utils import SaveFeatures
+from PIL import Image
+import torchvision.transforms as T
+import numpy as np
 
 # sys.modules.clear()
 
 
-def setup_model(model_path, verbose):
+def preprocess_image(image_path, device):
+    image = Image.open(image_path).convert("RGB")
+    transform = T.Compose(
+        [
+            T.Resize((640, 640)),
+            T.ToTensor(),
+        ]
+    )
+    image_tensor = transform(image).unsqueeze(0).to(device)
+    image_tensor.requires_grad = True
+    return image_tensor
+
+
+def setup_model(model_path, verbose=True):
     """
     Initialize YOLO model and image for inference.
 
@@ -27,8 +43,8 @@ def setup_model(model_path, verbose):
 
     path = Path(model_path if isinstance(model_path, (str, Path)) else "")
     if "-world" in path.stem and path.suffix in {".pt", ".yaml", ".yml"}:
-        yolo = YOLOWorld(path, verbose=verbose)
-        yolo = yolo.to(torch.device(device="cuda" if torch.cuda.is_available() else "cpu"))
+        world = YOLOWorld(path, verbose=verbose)
+        world = world.to(torch.device(device="cuda" if torch.cuda.is_available() else "cpu"))
 
         key_layer_idx = {
             "backbone_c2f1": 2,
@@ -42,12 +58,13 @@ def setup_model(model_path, verbose):
             "detect_head": 23,
         }
 
-        layers = {layer: yolo.model.model[idx] for layer, idx in key_layer_idx.items()}
+        layers = {layer: world.model.model[idx] for layer, idx in key_layer_idx.items()}
 
-    return yolo, layers
+    return world, layers
 
 
-def choose_extract_module(layers, extract_module_name):
+# ! Deprecated
+def choose_extract_static_module(layers, extract_module_name):
     # Hook for extracting features
     save_feats = SaveFeatures()
     extract_module = layers[extract_module_name]
@@ -55,7 +72,8 @@ def choose_extract_module(layers, extract_module_name):
     return save_feats, extract_module
 
 
-def extract_features(yolo, image_path, save_feats):
+# ! Deprecated
+def extract_static_features(yolo, image_path, save_feats):
     """
     Extract features from the image using the YOLO model.
 
@@ -81,12 +99,13 @@ def extract_features(yolo, image_path, save_feats):
         class_name = result.names[cls[0].item()]
         print(f"bbox: {xmin}, {ymin}, {xmax}, {ymax}, conf: {conf}, class: {class_name}")
 
-    extract_module_raw_feats = save_feats.features
+    extract_module_raw_feats = save_feats.get_features()
 
     return extract_module_raw_feats
 
 
-def extract_world_y_det(world, layers, save_feats):
+# ! Deprecated
+def extract_static_world_y_det(world, layers, save_feats):
     """
     Extract the y_det and y_det_target from the model outputs.
 
@@ -190,34 +209,100 @@ def extract_world_y_det(world, layers, save_feats):
     return y_det_orig, y_det_target
 
 
-def compute_gradients_y_det_and_activation(layer_name, y_det_orig, y_det_target, save_feats):
+def compute_gradients_y_det_and_activation(world, image_tensor, target_layer_name):
     """
-    Compute gradients for the specified layer based on y_det_orig and y_det_target.
+    在“固定目标”策略下计算梯度。
 
     Args:
-        layer_name (str): The name of the layer to compute gradients for.
-        y_det_orig (Tensor): The original detection tensor with max class probabilities.
-        y_det_target (Tensor): The detection tensor with second max class probabilities.
-        save_feats (SaveFeatures): Object that contains hooks for capturing activations and gradients.
+        world (YOLOWorld): 模型。
+        image_tensor (Tensor): 当前的对抗样本张量。
+        target_indices (Tensor): 从干净图像上得到的、固定的目标索引。
+        target_layer_name (str): 目标层的名称。
 
     Returns:
-        gradients (dict): The gradients of the selected layer with respect to y_det.
+        Tuple: (grad_A_orig, grad_A_target, activations['value'])
     """
-    y_det_orig.requires_grad_(True)
-    y_det_target.requires_grad_(True)
 
-    loss = y_det_orig[0][0]
-    loss.backward()
+    world.zero_grad()
 
-    gradients = save_feats.gradients
-    print(gradients.keys())
+    def forward_hook(module, input, output):
+        output.retain_grad()
+        activations['value'] = output
 
-    if layer_name in gradients:
-        layer_gradients = gradients[layer_name]
-    else:
-        layer_gradients = None
+    activations = {}
+    module_path = target_layer_name.split('.')
+    target_module = world
+    for part in module_path:
+        target_module = getattr(target_module, part)
+    handle = target_module.register_forward_hook(forward_hook)
 
-    return layer_gradients
+    # N: num of anchors
+    world.predictor = world._smart_load("predictor")(_callbacks=world.callbacks)
+    world.predictor.setup_model(model=world.model, verbose=False)
+    predictor = world.predictor
+
+    preds, _ = world.model(image_tensor)  # pred (B, 4+nc, N)
+    raw_cls = preds[:, 4:, :]  #  logits (B, nc, N)
+    detections, keep_idxs = ops.non_max_suppression(
+        preds,
+        predictor.args.conf,
+        predictor.args.iou,
+        predictor.args.classes,
+        predictor.args.agnostic_nms,
+        predictor.args.max_det,
+        nc=0 if predictor.args.task == "detect" else len(predictor.model.names),
+        end2end=getattr(predictor.model, "end2end", False),
+        rotated=predictor.args.task == "obb",
+        return_idxs=True,
+    )
+
+    max_out = max(idx.numel() for idx in keep_idxs)
+
+    nms_idxs = raw_cls.new_zeros(raw_cls.shape[0], max_out, dtype=torch.long)  # (B, max_out)
+    mask = torch.zeros(raw_cls.shape[0], max_out, dtype=torch.bool, device=raw_cls.device)
+
+    for b, ids in enumerate(keep_idxs):
+        if ids.numel() == 0:
+            continue
+        nms_idxs[b, : ids.numel()] = ids
+        mask[b, : ids.numel()] = True
+
+    nms_idxs = nms_idxs.unsqueeze(1).expand(-1, raw_cls.shape[1], -1)  # (B, nc, max_out)
+    y_det = torch.gather(raw_cls, 2, nms_idxs)  # (B, nc, max_out)
+    y_det = y_det.masked_fill(~mask.unsqueeze(1), 0.0)
+    nms_idxs = nms_idxs[:, 0, :]
+
+    if y_det.shape[2] == 0:  # 如果没有检测到任何目标
+        print("Warning: No targets were provided to attack.")
+        handle.remove()
+        return None, None, activations.get('value')
+
+    _, topk_indices = torch.topk(y_det, 2, dim=1)
+
+    y_det_orig = y_det.gather(1, topk_indices[:, :1, :]).squeeze(1)  # Shape: [1, num_fixed_targets]
+    y_det_target = y_det.gather(1, topk_indices[:, 1:, :]).squeeze(1)  # Shape: [1, num_fixed_targets]
+
+    total_loss_orig = y_det_orig.sum()
+    total_loss_target = y_det_target.sum()
+
+    total_loss_orig = y_det_orig.sum()
+    total_loss_target = y_det_target.sum()
+
+    print(f"\nScores for fixed targets (sum): orig={total_loss_orig.item()}, target={total_loss_target.item()}")
+
+    # backforward
+    total_loss_orig.backward(retain_graph=True)
+    grad_orig_A = activations['value'].grad.clone()
+
+    world.zero_grad()
+    total_loss_target.backward()
+    grad_target_A = activations['value'].grad.clone()
+
+    A_value = activations.get('value')
+    handle.remove()
+    print("Successfully computed gradients on fixed targets.")
+
+    return grad_orig_A, grad_target_A, A_value
 
 
 if __name__ == "__main__":
@@ -227,11 +312,17 @@ if __name__ == "__main__":
 
     # Initialize model and image
     yolo_world, world_layers = setup_model(model_path=model_path, verbose=True)
+    image_tensor = preprocess_image(image_path, yolo_world.device)
 
-    save_feats, extract_module = choose_extract_module(layers=world_layers, extract_module_name='detect_head')
-    activations = extract_features(yolo=yolo_world, image_path=image_path, save_feats=save_feats)
-    y_det_orig, y_det_target = extract_world_y_det(world=yolo_world, layers=world_layers, save_feats=save_feats)
-    layer_gradients = compute_gradients_y_det_and_activation(
-        layer_name='detect_head.cv2.0', y_det_orig=y_det_orig, y_det_target=y_det_target, save_feats=save_feats
+    # save_feats, extract_module = choose_extract_static_module(layers=world_layers, extract_module_name='detect_head')
+    # activations = extract_static_features(yolo=yolo_world, image_path=image_path, save_feats=save_feats)
+    # y_det_orig, y_det_target = extract_static_world_y_det(world=yolo_world, layers=world_layers, save_feats=save_feats)
+    # compute_gradients_y_det_and_activation(layer_name='detect_head.cv2.0', y_det_orig=y_det_orig, y_det_target=y_det_target, save_feats=save_feats)
+
+    grad_orig_A, grad_target_A, A_value = compute_gradients_y_det_and_activation(
+        world=yolo_world, image_tensor=image_tensor, target_layer_name='model.model.22.cv2'
     )
-    print(layer_gradients)
+
+    print(grad_orig_A.size())
+    print(grad_target_A.size())
+    print(A_value.size())
