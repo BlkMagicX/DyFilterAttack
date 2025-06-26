@@ -58,7 +58,7 @@ def compute_full_weight(alpha_t, alpha_o, direction):
     return weight_p, weight_n
 
 
-def compute_mask(weight_p: torch.Tensor, weight_n: torch.Tensor, spatial_mask: torch.Tensor):
+def compute_decouple_mask(weight_p: torch.Tensor, weight_n: torch.Tensor, spatial_mask: torch.Tensor):
     """
     Element-wise masks M_k^± = W_k^± ⊗ S_k.
 
@@ -79,22 +79,20 @@ def compute_mask(weight_p: torch.Tensor, weight_n: torch.Tensor, spatial_mask: t
     return mask_p, mask_n
 
 
-if __name__ == "__main__":
+def compute_mask(mask_p, mask_n):
+    """
+    Combine positive-/negative masks into a single mask.
 
-    model_path = "./DyFilterAttack/models/yolov8s-world.pt"
-    image_path = "./DyFilterAttack/testset/bus.jpg"
+    Args
+    ----
+    mask_p: Tensor, (B, N, C, H, W)
+    mask_n: Tensor, (B, N, C, H, W)
 
-    # Initialize model and image
-    yolo_world, world_layers = setup_model(model_path=model_path, verbose=True)
-    image_tensor = preprocess_image(image_path, yolo_world.device)
-    grad_orig_A, grad_target_A, A_value = compute_gradients_y_det_and_activation(
-        world=yolo_world, image_tensor=image_tensor, target_layer_name='model.model.22.cv2'
-    )
-
-    weight_p, weight_n = compute_channel_weights(grad_orig_A, grad_target_A)
-    s_k = compute_spatial_map(grad_orig_A)
-    mask_p, mask_n = compute_mask(weight_p, weight_n, s_k)
-
-    print("weight_p  :", weight_p.shape)  # (B,N,C,1,1)
-    print("s_k    :", s_k.shape)  # (B,N,C,H,W)
-    print("mask_p  :", mask_p.shape)  # (B,N,C,H,W)
+    Returns
+    -------
+    mask : Tensor, (B, N, C, H, W)
+           element > 0  → value from mask_p
+           element < 0  → value from mask_n
+    """
+    mask = torch.where(mask_p > 0, mask_p, mask_n)
+    return mask
