@@ -11,19 +11,22 @@ import numpy as np
 
 # sys.modules.clear()
 
+import cv2
+from ultralytics.data.augment import LetterBox
 
-def preprocess_image(image_path, device):
-    image = Image.open(image_path).convert("RGB")
-    transform = T.Compose(
-        [
-            T.Resize((640, 640)),
-            T.ToTensor(),
-        ]
-    )
-    image_tensor = transform(image).unsqueeze(0).to(device)
-    image_tensor.requires_grad = True
-    return image_tensor
-
+def preprocess_image(image_path, device, new_shape=(640, 640), auto=False, scale_fill=False, scaleup=True, stride=32, fp16=False):
+    img = cv2.imread(image_path)
+    img = img[..., ::-1]
+    letterbox = LetterBox(new_shape=new_shape, auto=auto, scale_fill=scale_fill, scaleup=scaleup, stride=stride)
+    img = letterbox(image=img)
+    img = img.transpose((2, 0, 1))
+    img = np.ascontiguousarray(img)
+    img_tensor = torch.from_numpy(img).unsqueeze(0)
+    img_tensor = img_tensor.to(device)
+    img_tensor = img_tensor.half() if fp16 else img_tensor.float()
+    img_tensor = img_tensor / 255.0
+    img_tensor.requires_grad = True
+    return img_tensor
 
 def setup_model(model_path, verbose=True):
     """
@@ -314,7 +317,7 @@ if __name__ == "__main__":
 
     # Initialize model and image
     yolo_world, world_layers = setup_model(model_path=model_path, verbose=True)
-    image_tensor = preprocess_image(image_path, yolo_world.device)
+    image_tensor = preprocess_image(image_path, yolo_world.device, new_shape=(640, 640), fp16=True)
 
     # save_feats, extract_module = choose_extract_static_module(layers=world_layers, extract_module_name='detect_head')
     # activations = extract_static_features(yolo=yolo_world, image_path=image_path, save_feats=save_feats)
