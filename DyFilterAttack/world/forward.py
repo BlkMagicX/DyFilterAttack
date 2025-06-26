@@ -8,6 +8,7 @@ from numpy import np
 
 # sys.modules.clear()
 
+
 # ! Deprecated
 def choose_extract_static_module(layers, extract_module_name):
     # Hook for extracting features
@@ -250,34 +251,3 @@ def compute_gradients_y_det_and_activation(world, image_tensor, target_layer_nam
     print("Gradients computed.")
 
     return grad_orig, grad_target, A.detach()
-
-
-if __name__ == "__main__":
-
-    model_path = "./DyFilterAttack/models/yolov8s-world.pt"
-    image_path = "./DyFilterAttack/testset/bus.jpg"
-
-    # Initialize model and image
-    yolo_world, world_layers = setup_model(model_path=model_path, verbose=True)
-    image_tensor = preprocess_image(image_path, yolo_world.device, new_shape=(640, 640), fp16=True)
-
-    # save_feats, extract_module = choose_extract_static_module(layers=world_layers, extract_module_name='detect_head')
-    # activations = extract_static_features(yolo=yolo_world, image_path=image_path, save_feats=save_feats)
-    # y_det_orig, y_det_target = extract_static_world_y_det(world=yolo_world, layers=world_layers, save_feats=save_feats)
-    # compute_gradients_y_det_and_activation(layer_name='detect_head.cv2.0', y_det_orig=y_det_orig, y_det_target=y_det_target, save_feats=save_feats)
-
-    grad_orig, grad_target, A_value = compute_gradients_y_det_and_activation(
-        world=yolo_world, image_tensor=image_tensor, target_layer_name="model.model.22.cv2"
-    )
-
-    print("\nsize:")
-    print(f"grad_orig_A {grad_orig.size()}")
-    print(f"grad_target_A {grad_target.size()}")
-    print(f"A_value {A_value.size()}")
-
-    # print('\nvalue: ')
-    # print('grad idx:[B=0, N=0, C=0, :, :]')
-    # print(f'grad_orig_A {grad_orig_A[0, 0, 0, :, :]}')
-    # print(f'grad_target_A {grad_target_A[0, 0, 0, :, :]}')
-    # print('grad idx:[B=0, C=0, :, :]')
-    # print(f'A_value {A_value[0, 0, :, :]}')
