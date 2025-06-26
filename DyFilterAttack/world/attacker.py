@@ -9,15 +9,16 @@ from experiment import ExpConfig
 import forward
 import weight
 import loss
-
+import dataset
+from torch.utils.data import DataLoader
 
 class WorldAttacker:
     def __init__(self, model_path, attack_layer_name):
         self.experiment = self.setup_experiment()
-        self.dataset = self.setup_dataset()
+        self.dataset, self.dataloader = self.setup_dataset()
         self.world, self.layers = self.setup_model(model_path, verbose=True)
         self.attack_layer_name, self.attack_layer = self.choose_attack_layer(attack_layer_name)
-
+        
     def setup_experiment(self):
         base_hyp = dict(eps=8 / 255, lr=1e-2, num_iter=40)
         target_layers = ["model.model.22.cv2", "model.model.19.cv1"]
@@ -32,11 +33,27 @@ class WorldAttacker:
                 continue
             exps[name] = ExpConfig(name=name, hyp=base_hyp.copy(), target_layer=layer, optim_name=opt)
         return exps
-
-    def setup_dataset(self):
-        dataset = None
-        return dataset
-
+    
+    def setup_dataset(self, images_dir_path, labels_dir_path, image_width=640, image_height=640, batch_size=1):
+        if images_dir_path and labels_dir_path:
+            custom_dataset = dataset.CustomDataset(
+                images_dir_path=images_dir_path,
+                labels_dir_path=labels_dir_path,
+                image_width=image_width,
+                image_height=image_height
+        )
+            dataloader = DataLoader(
+                custom_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                collate_fn=dataset.custom_collate_fn,
+                num_workers=0
+        )
+            return custom_dataset, dataloader
+        else:
+            print("Warning: No dataset paths provided")
+            return None, None
+    
     def setup_model(self, model_path, verbose=True):
         print("\nsetup_model...")
         warnings.filterwarnings(action="ignore")

@@ -4,26 +4,9 @@ from DyFilterAttack.analyzer.utils import SaveFeatures
 from PIL import Image
 import torchvision.transforms as T
 import cv2
-from ultralytics.data.augment import LetterBox
 from numpy import np
 
 # sys.modules.clear()
-
-
-def preprocess_image(image_path, device, new_shape=(640, 640), auto=False, scale_fill=False, scaleup=True, stride=32, fp16=False):
-    img = cv2.imread(image_path)
-    img = img[..., ::-1]
-    letterbox = LetterBox(new_shape=new_shape, auto=auto, scale_fill=scale_fill, scaleup=scaleup, stride=stride)
-    img = letterbox(image=img)
-    img = img.transpose((2, 0, 1))
-    img = np.ascontiguousarray(img)
-    img_tensor = torch.from_numpy(img).unsqueeze(0)
-    img_tensor = img_tensor.to(device)
-    img_tensor = img_tensor.half() if fp16 else img_tensor.float()
-    img_tensor = img_tensor / 255.0
-    img_tensor.requires_grad = True
-    return img_tensor
-
 
 # ! Deprecated
 def choose_extract_static_module(layers, extract_module_name):
