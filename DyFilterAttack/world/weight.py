@@ -17,10 +17,10 @@ def compute_basic_weights(grad_orig, grad_target):
 
     Returns
     -------
-    alpha_o : Tensor, shape (B, N, C, 1, 1)
-            promote target class
     alpha_t : Tensor, shape (B, N, C, 1, 1)
             suppress original class
+    alpha_o : Tensor, shape (B, N, C, 1, 1)
+            promote target class
     """
     # Global-average-pool over spatial dims
     alpha_o = grad_orig.mean(dim=(3, 4), keepdim=True)  # (B,N,C,1,1)
@@ -52,8 +52,8 @@ def compute_spatial_mask(grad_orig):
 
 def compute_full_weight(alpha_t, alpha_o, direction):
 
-    weight_p = direction * alpha_t.abs()
-    weight_n = direction * alpha_o.abs()
+    weight_p = torch.where(direction > 0, alpha_t.abs(), alpha_o.abs())
+    weight_n = torch.where(direction < 0, -alpha_o.abs(), -alpha_t.abs())
 
     return weight_p, weight_n
 

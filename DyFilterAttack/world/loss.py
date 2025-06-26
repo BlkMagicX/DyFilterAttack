@@ -33,7 +33,7 @@ def total(mask_p, mask_n, activation, lambda_promote=1.0, lambda_surpress=1.0):
 
         loss_promote += -torch.sum(m_pos * feat)
 
-        loss_suppress += -torch.sum(m_neg * feat)
+        loss_suppress += torch.sum(torch.abs(m_neg) * feat)
 
     loss_total = lambda_promote * loss_promote + lambda_surpress * loss_suppress
 

@@ -2,7 +2,7 @@ from dataclasses import dataclass, asdict
 from typing import Dict, List, Callable
 import torch
 
-# 用字符串占位，真正实例化 Optimizer 时再传 params 和 lr
+# Use a string placeholder, and pass params and lr when truly instantiating the Optimizer.
 OPTIMIZER_FACTORY: Dict[str, Callable] = {
     "adam": lambda p, lr: torch.optim.Adam(p, lr=lr),
     "sgd": lambda p, lr: torch.optim.SGD(p, lr=lr, momentum=0.9),

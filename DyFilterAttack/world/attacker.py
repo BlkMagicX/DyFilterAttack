@@ -17,25 +17,23 @@ import loss
 import dataset
 
 
-model_path = "./DyFilterAttack/models/yolov8s-world.pt"
-image_path = "./DyFilterAttack/testset/bus.jpg"
-
-
 class WorldAttacker:
 
-    def __init__(self, model_path, attack_layer_name, images_dir_path, labels_dir_path):
+    def __init__(self, model_path, attack_layer_name, meta_json, images_dir_path):
         self.experiment = self.setup_experiment()
-        self.dataset = self.setup_dataset(images_dir_path, labels_dir_path)
+        self.attack_dataset = self.setup_dataset(meta_json, images_dir_path)
         self.world, self.layers = self.setup_model(model_path, verbose=True)
+        self.predictor = self.world._smart_load("predictor")(_callbacks=self.world.callbacks)
+        self.predictor.setup_model(model=self.world.model, verbose=False)
         self.attack_layer_name, self.attack_layer = self.choose_attack_layer(attack_layer_name)
 
     def setup_experiment(self):
-        base_hyp = dict(eps=8 / 255, lr=1e-2, num_iter=40)
+        base_hyp = dict(eps=0.05, lr=0.005, num_iter=10)
         target_layers = ["model.model.22.cv2", "model.model.19.cv1"]
         optimizer_names = ["adam", "sgd", "adamw"]
         exps = {}
         # create baseline exp
-        exps["baseline"] = experiment.ExpConfig(name="baseline_adam", hyp=base_hyp.copy(), target_layer="model.model.22.cv2", optim_name="adam")
+        exps["baseline"] = experiment.ExpConfig(name="baseline", hyp=base_hyp.copy(), target_layer="model.model.22.cv2", optim_name="adam")
         # create exps list
         for layer, opt in product(target_layers, optimizer_names):
             name = f"{layer.split('.')[-1]}_{opt}"
@@ -44,9 +42,9 @@ class WorldAttacker:
             exps[name] = experiment.ExpConfig(name=name, hyp=base_hyp.copy(), target_layer=layer, optim_name=opt)
         return exps
 
-    def setup_dataset(self, images_dir_path, labels_dir_path):
-        custom_dataset = dataset.CustomDataset(images_dir_path=images_dir_path, labels_dir_path=labels_dir_path)
-        return custom_dataset
+    def setup_dataset(self, meta_json, images_dir_path):
+        attack_dataset = dataset.AttackDataset(meta_json=meta_json, images_dir_path=images_dir_path)
+        return attack_dataset
 
     def setup_model(self, model_path, verbose=True):
         print("\nsetup_model...")
@@ -80,11 +78,15 @@ class WorldAttacker:
         attack_layer = self.layers[attack_layer_name]
         return attack_layer_name, attack_layer
 
-    def forward(self, preprocess_tensor):
+    def forward(self, preprocess_tensor, det_ids_batch):
         self.image_tensor = preprocess_tensor.requires_grad_(True)
         # compute activation and gard
         self.grad_orig, self.grad_target, self.activation = forward.compute_gradients_y_det_and_activation(
-            world=self.world, image_tensor=self.image_tensor, target_layer_name=self.attack_layer_name
+            world=self.world,
+            image_tensor=self.image_tensor,
+            target_layer_name=self.attack_layer_name,
+            det_ids_batch=det_ids_batch,
+            predictor=self.predictor,
         )
         # compute parameters
         self.alpha_o, self.alpha_t = weight.compute_basic_weights(grad_orig=self.grad_orig, grad_target=self.grad_target)
@@ -119,7 +121,7 @@ class WorldAttacker:
 
             x_adv = (x_orig + delta).clamp(0, 1)
 
-            self.forward(x_adv)
+            self.forward(x_adv, batch["det_ids"])
 
             loss_total, loss_promote, loss_surpress = loss.total(
                 mask_p=self.mask_p, mask_n=self.mask_n, activation=self.activation, lambda_promote=1.0, lambda_surpress=1.0
@@ -140,7 +142,7 @@ class WorldAttacker:
         return x_adv
 
     def batch_attack(self, experiment_name, output_dir="./DyFilterAttack/world/result", batch_size=1):
-        dataloader = DataLoader(self.custom_dataset, batch_size=batch_size, shuffle=False, collate_fn=dataset.custom_collate_fn)
+        dataloader = DataLoader(self.attack_dataset, batch_size=batch_size, shuffle=False, collate_fn=dataset.attack_collate)
         batch_loader_with_progress = tqdm(dataloader, desc=f"Processing Batches: ", total=len(dataloader))
         for batch in batch_loader_with_progress:
             if batch is None:

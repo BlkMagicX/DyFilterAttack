@@ -1,7 +1,9 @@
 import torch
 from pathlib import Path
 import cv2
+import json
 import numpy as np
+from typing import List, Dict
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 from ultralytics.data.augment import LetterBox
@@ -135,4 +137,79 @@ def custom_collate_fn(batch):
         "batch_indices": batch_indices,
         "classes": classes,
         "bboxes": bboxes,
+    }
+
+
+class AttackDataset(Dataset):
+    """
+    det_ids_batch: List of tensors, one per image in the batch.
+      Each tensor contains the indices (in NMS output) of the detection boxes that we want to attack.
+      For example, det_ids_batch[b] = Tensor([7, 15, 42]) means:
+        - For the b-th image in the batch,
+        - Only attack the 7th, 15th, and 42nd detection boxes in the NMS output.
+
+    These indices are selected based on certain criteria (e.g., confidence, class, IoU),
+    and are stored in the 'det_ids' field of the attack_meta.json file during preprocessing.
+
+    During training/inference, the DataLoader loads this information and passes it directly
+    to the forward() function → compute_gradients_y_det_and_activation().
+    """
+
+    IMG_EXT = {".jpg", ".jpeg", ".png"}
+
+    def __init__(self, meta_json: str, images_dir_path: str):
+        super().__init__()
+        self.records: List[Dict] = json.load(open(meta_json, "r"))
+        self.images_dir_path = Path(images_dir_path)
+        self.image_width = 640
+        self.image_height = 640
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.lb = LetterBox(new_shape=(self.image_width, self.image_height), auto=False, scale_fill=False, scaleup=True, stride=32)
+
+    def _read_and_preprocess(self, img_path: Path) -> torch.Tensor:
+        im = cv2.imread(str(img_path))
+        if im is None:
+            raise FileNotFoundError(f"img not found: {img_path}")
+        im = im[..., ::-1]  # BGR → RGB
+        im = self.lb(image=im)  # letterbox
+        im = im.transpose(2, 0, 1)  # C,H,W
+        im = np.ascontiguousarray(im, dtype=np.float32) / 255.0
+        im_t = torch.from_numpy(im).to(self.device)
+        return im_t
+
+    def __len__(self):
+        return len(self.records)
+
+    def __getitem__(self, idx: int):
+        rec = self.records[idx]
+        img_rel = rec["image"].replace("\\", "/")
+        img_path = self.images_dir_path / img_rel
+        img_t = self._read_and_preprocess(img_path)
+
+        det_ids = torch.tensor(rec["det_ids"], dtype=torch.long, device=self.device)
+        return {
+            "image": img_t,
+            "image_path": str(img_path),
+            "det_ids": det_ids,
+        }
+
+
+def attack_collate(batch: List[Dict]):
+    """
+    - images 堆叠 -> Tensor (B,C,H,W)
+    - det_ids 保留 list[Tensor]，长度对齐 images
+    """
+    if batch is None or len(batch) == 0:
+        return None
+
+    device = batch[0]["image"].device
+    images = torch.stack([b["image"] for b in batch]).to(device)
+
+    image_paths = [b["image_path"] for b in batch]
+    det_ids = [b["det_ids"] for b in batch]  # list of Tensor
+
+    return {
+        "image": images,
+        "image_path": image_paths,
+        "det_ids": det_ids,
     }
