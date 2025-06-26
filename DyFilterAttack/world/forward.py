@@ -3,11 +3,12 @@ from ultralytics.utils import ops
 from DyFilterAttack.analyzer.utils import SaveFeatures
 from PIL import Image
 import torchvision.transforms as T
+import cv2
+from ultralytics.data.augment import LetterBox
+from numpy import np
 
 # sys.modules.clear()
 
-import cv2
-from ultralytics.data.augment import LetterBox
 
 def preprocess_image(image_path, device, new_shape=(640, 640), auto=False, scale_fill=False, scaleup=True, stride=32, fp16=False):
     img = cv2.imread(image_path)
@@ -22,6 +23,7 @@ def preprocess_image(image_path, device, new_shape=(640, 640), auto=False, scale
     img_tensor = img_tensor / 255.0
     img_tensor.requires_grad = True
     return img_tensor
+
 
 # ! Deprecated
 def choose_extract_static_module(layers, extract_module_name):
@@ -282,13 +284,13 @@ if __name__ == "__main__":
     # compute_gradients_y_det_and_activation(layer_name='detect_head.cv2.0', y_det_orig=y_det_orig, y_det_target=y_det_target, save_feats=save_feats)
 
     grad_orig, grad_target, A_value = compute_gradients_y_det_and_activation(
-        world=yolo_world, image_tensor=image_tensor, target_layer_name='model.model.22.cv2'
+        world=yolo_world, image_tensor=image_tensor, target_layer_name="model.model.22.cv2"
     )
 
-    print('\nsize:')
-    print(f'grad_orig_A {grad_orig.size()}')
-    print(f'grad_target_A {grad_target.size()}')
-    print(f'A_value {A_value.size()}')
+    print("\nsize:")
+    print(f"grad_orig_A {grad_orig.size()}")
+    print(f"grad_target_A {grad_target.size()}")
+    print(f"A_value {A_value.size()}")
 
     # print('\nvalue: ')
     # print('grad idx:[B=0, N=0, C=0, :, :]')
