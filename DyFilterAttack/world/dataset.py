@@ -4,42 +4,30 @@ import cv2
 import numpy as np
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
-from PIL import Image
-import yaml
-import os
 from ultralytics.data.augment import LetterBox
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class CustomDataset(Dataset):
-    def __init__(self, images_dir_path, labels_dir_path, image_width, image_height):
-        """
-        self.image_paths is a list containing the paths of all image files.
-        self.label_paths is a list containing the paths of all label files,
-        with each label file path corresponding one-to-one with the respective image file path.
-        """
+    def __init__(self, images_dir_path, labels_dir_path):
         super().__init__()
         self.image_paths = sorted([p for p in Path(images_dir_path).glob("*") if p.suffix.lower() in {".png", ".jpg", ".jpeg"}], key=lambda x: x.stem)
         self.label_paths = [Path(labels_dir_path) / f"{p.stem}.txt" for p in self.image_paths]
-        self.origin_images_dir_path = images_dir_path
-        self.origin_labels_dir_path = labels_dir_path
-
-        self.image_width = image_width
-        self.image_height = image_height
+        self.image_width = 640
+        self.image_height = 640
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def __len__(self):
         return len(self.image_paths)
 
-    def load_image(self, image_path):
-        img = cv2.imread(image_path)
-        img = img[..., ::-1]
-        letterbox = LetterBox(new_shape=(640, 640), auto=False, scale_fill=False, scaleup=True, stride=32)
-        img = letterbox(image=img)
-        img = img.transpose((2, 0, 1))
-        img = np.ascontiguousarray(img)
-        img_tensor = torch.from_numpy(img)
-        img_tensor = img_tensor.to(device)
+    def preprocess_image(self, image_path):
+        image = cv2.imread(image_path)
+        image = image[..., ::-1]
+        letterbox = LetterBox(new_shape=(self.image_width, self.image_height), auto=False, scale_fill=False, scaleup=True, stride=32)
+        image = letterbox(image=image)
+        image = image.transpose((2, 0, 1))
+        image = np.ascontiguousarray(image)
+        img_tensor = torch.from_numpy(image)
+        img_tensor = img_tensor.to(self.device)
         img_tensor = img_tensor.float()
         img_tensor = img_tensor / 255.0
         return img_tensor
@@ -66,15 +54,6 @@ class CustomDataset(Dataset):
         return torch.stack([x_min, y_min, x_max, y_max], axis=1)
 
     def convert_yolo_to_batch_format_torch(self, labels, idx):
-        """
-        Convert YOLO format labels to batch-compatible format for detection tasks
-
-        Args:
-            idx (int): Sample index in dataset
-
-        Returns:
-            tuple: (batch_indices, classes, bboxes) as torch.Tensor or None if empty
-        """
         if labels.numel() == 0:
             return (torch.empty(0, 1, dtype=torch.long), torch.empty(0, 1, dtype=torch.long), torch.empty(0, 4, dtype=torch.float32))
 
@@ -84,18 +63,6 @@ class CustomDataset(Dataset):
         return batch_indices, classes, bboxes
 
     def generate_mask(self, bboxes):
-        """
-        Generate binary mask for object regions from bounding bboxes
-
-        Args:
-            bboxes (torch.Tensor): Bounding bboxes in [xmin, ymin, xmax, ymax] format,
-                                shape: (N, 4) where N is number of bboxes
-
-        Returns:
-            torch.Tensor: Binary mask of shape (image_height, image_width)
-                        where 1 indicates object regions
-        """
-        # Initialize empty mask
         mask = torch.zeros((self.image_height, self.image_width), dtype=torch.float32, device=bboxes.device if torch.is_tensor(bboxes) else "cpu")
 
         # Early return if no bboxes
@@ -118,14 +85,14 @@ class CustomDataset(Dataset):
         return mask.unsqueeze(0).expand(3, -1, -1)
 
     def __getitem__(self, idx):
-        img = self.load_image(self.image_paths[idx])
+        image = self.preprocess_image(self.image_paths[idx])
         label = self.load_label(self.label_paths[idx])
         image_path = self.image_paths[idx]
         label_path = self.label_paths[idx]
         batch_indices, classes, bboxes = self.convert_yolo_to_batch_format_torch(label, idx)
         mask = self.generate_mask(bboxes)
         dict = {
-            "image": img,
+            "image": image,
             "label": label,
             "image_path": image_path,
             "label_path": label_path,
@@ -134,48 +101,31 @@ class CustomDataset(Dataset):
             "bboxes": bboxes,
             "mask": mask,
         }
-        # print("path: ", self.label_paths[idx])
         return dict
 
 
 def custom_collate_fn(batch):
-    """
-    Custom collate function to handle batch processing with padding.
-
-    Filters out samples with empty labels and returns a batch dictionary.
-
-    Args:
-        batch (list): List of dictionaries containing image, mask, labels, etc.
-
-    Returns:
-        dict: Batched data with padded sequences, or None if all samples are filtered out.
-    """
-    # Filter out samples with empty labels
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch = [sample for sample in batch if len(sample["label"]) > 0]
-    if not batch:  # A more Pythonic way to check for an empty list
-        return None  # Return None if no valid samples remain
+    if not batch:
+        return None
 
-    # Collect data from each sample
     image_path = [sample["image_path"] for sample in batch]
     label_path = [sample["label_path"] for sample in batch]
 
-    # For tensors that are already the same size (image and mask), torch.stack is correct.
     image = torch.stack([sample["image"] for sample in batch], dim=0).to(device)
     mask = torch.stack([sample["mask"] for sample in batch], dim=0).to(device)
 
-    # For variable-length tensors, collect them into lists first.
     labels_list = [sample["label"] for sample in batch]
     batch_indices_list = [sample["batch_indices"] for sample in batch]
     classes_list = [sample["classes"] for sample in batch]
     bboxes_list = [sample["bboxes"] for sample in batch]
 
-    # Now, pad the sequences of these variable-length tensors.
     label = pad_sequence(labels_list, batch_first=True, padding_value=-1).to(device)  # (B, N_max, D)
     batch_indices = pad_sequence(batch_indices_list, batch_first=True, padding_value=-1).to(device)  # (B, N_max, 1)
     classes = pad_sequence(classes_list, batch_first=True, padding_value=-1).to(device)  # (B, N_max, 1)
     bboxes = pad_sequence(bboxes_list, batch_first=True, padding_value=-1).to(device)  # (B, N_max, 4)
 
-    # Return the correctly batched and padded dictionary
     return {
         "image_path": image_path,
         "label_path": label_path,

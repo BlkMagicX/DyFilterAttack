@@ -1,25 +1,31 @@
-import torch
-import warnings
-from pathlib import Path
 from ultralytics import YOLOWorld
+from pathlib import Path
 from itertools import product
-from experiment import ExpConfig
+from torch.utils.data import DataLoader
+from PIL import Image
+from tqdm import tqdm
+import os
+import torch
+import shutil
+import warnings
 
 
+import experiment
 import forward
 import weight
 import loss
 import dataset
-from torch.utils.data import DataLoader
+
 
 model_path = "./DyFilterAttack/models/yolov8s-world.pt"
 image_path = "./DyFilterAttack/testset/bus.jpg"
 
 
 class WorldAttacker:
-    def __init__(self, model_path, attack_layer_name):
+
+    def __init__(self, model_path, attack_layer_name, images_dir_path, labels_dir_path):
         self.experiment = self.setup_experiment()
-        self.dataset, self.dataloader = self.setup_dataset()
+        self.dataset = self.setup_dataset(images_dir_path, labels_dir_path)
         self.world, self.layers = self.setup_model(model_path, verbose=True)
         self.attack_layer_name, self.attack_layer = self.choose_attack_layer(attack_layer_name)
 
@@ -29,25 +35,18 @@ class WorldAttacker:
         optimizer_names = ["adam", "sgd", "adamw"]
         exps = {}
         # create baseline exp
-        exps["baseline"] = ExpConfig(name="baseline_adam", hyp=base_hyp.copy(), target_layer="model.model.22.cv2", optim_name="adam")
+        exps["baseline"] = experiment.ExpConfig(name="baseline_adam", hyp=base_hyp.copy(), target_layer="model.model.22.cv2", optim_name="adam")
         # create exps list
         for layer, opt in product(target_layers, optimizer_names):
             name = f"{layer.split('.')[-1]}_{opt}"
             if name in exps:
                 continue
-            exps[name] = ExpConfig(name=name, hyp=base_hyp.copy(), target_layer=layer, optim_name=opt)
+            exps[name] = experiment.ExpConfig(name=name, hyp=base_hyp.copy(), target_layer=layer, optim_name=opt)
         return exps
 
-    def setup_dataset(self, images_dir_path, labels_dir_path, image_width=640, image_height=640, batch_size=1):
-        if images_dir_path and labels_dir_path:
-            custom_dataset = dataset.CustomDataset(
-                images_dir_path=images_dir_path, labels_dir_path=labels_dir_path, image_width=image_width, image_height=image_height
-            )
-            dataloader = DataLoader(custom_dataset, batch_size=batch_size, shuffle=True, collate_fn=dataset.custom_collate_fn, num_workers=0)
-            return custom_dataset, dataloader
-        else:
-            print("Warning: No dataset paths provided")
-            return None, None
+    def setup_dataset(self, images_dir_path, labels_dir_path):
+        custom_dataset = dataset.CustomDataset(images_dir_path=images_dir_path, labels_dir_path=labels_dir_path)
+        return custom_dataset
 
     def setup_model(self, model_path, verbose=True):
         print("\nsetup_model...")
@@ -81,9 +80,8 @@ class WorldAttacker:
         attack_layer = self.layers[attack_layer_name]
         return attack_layer_name, attack_layer
 
-    def forward(self, preprocessed_image_tensor):
-        # ! 这里的image_tensor必须是预处理过后的
-        self.image_tensor = preprocessed_image_tensor.requires_grad_(True)
+    def forward(self, preprocess_tensor):
+        self.image_tensor = preprocess_tensor.requires_grad_(True)
         # compute activation and gard
         self.grad_orig, self.grad_target, self.activation = forward.compute_gradients_y_det_and_activation(
             world=self.world, image_tensor=self.image_tensor, target_layer_name=self.attack_layer_name
@@ -102,12 +100,9 @@ class WorldAttacker:
         loss.backward()
         return None if x.grad is None else x.grad.detach()
 
-    def attack_success(self):
-        pass
-
-    def adversarial_attack(self, sample, expriment):
-        hyp = expriment.hyp
-        x_orig = sample["image"].to(self.world.device)
+    def adversarial_attack(self, batch, experiment):
+        hyp = experiment.hyp
+        x_orig = batch["image"].to(self.world.device)
         if x_orig.dim() == 3:
             x_orig = x_orig.unsqueeze(0)
         x_orig = x_orig.detach()
@@ -115,7 +110,7 @@ class WorldAttacker:
         delta = torch.empty_like(x_orig).uniform_(-hyp["eps"], hyp["eps"]).to(self.world.device)
         delta.requires_grad_(True)
 
-        optimizer = expriment.build_optimizer(delta)
+        optimizer = experiment.build_optimizer(delta)
 
         print("start attack for 1 batch")
         print(f"{'Loss:':>9}" f"{'loss_total':>16}" f"{'loss_p':>16}" f"{'loss_s':>16}")
@@ -144,7 +139,30 @@ class WorldAttacker:
 
         return x_adv
 
-    def batch_attack(self):
+    def batch_attack(self, experiment_name, output_dir="./DyFilterAttack/world/result", batch_size=1):
+        dataloader = DataLoader(self.custom_dataset, batch_size=batch_size, shuffle=False, collate_fn=dataset.custom_collate_fn)
+        batch_loader_with_progress = tqdm(dataloader, desc=f"Processing Batches: ", total=len(dataloader))
+        for batch in batch_loader_with_progress:
+            if batch is None:
+                continue
+
+            perturbed_batch = self.adversarial_attack(batch, self.experiment[experiment_name])
+
+            os.makedirs(os.path.join(output_dir, "images"), exist_ok=True)
+            os.makedirs(os.path.join(output_dir, "labels"), exist_ok=True)
+            for i in range(len(perturbed_batch)):
+                perturbed_img = perturbed_batch[i].cpu()
+                original_image_path = batch["image_path"][i]
+                original_label_path = batch["label_path"][i]
+
+                perturbed_np = (perturbed_img * 255).clamp(0, 255).byte().numpy().transpose(1, 2, 0)
+                custom_image_path = os.path.join(output_dir, "images", os.path.basename(original_image_path))
+
+                Image.fromarray(perturbed_np).save(custom_image_path)
+                custom_labels_path = os.path.join(output_dir, "labels", os.path.basename(original_label_path))
+                shutil.copy2(original_label_path, custom_labels_path)
+
+    def attack_success(self):
         pass
 
     def evaluation(self):
